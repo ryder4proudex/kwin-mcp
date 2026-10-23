@@ -1,0 +1,13 @@
+# Commit gates (repo-gates kit). Bypassing with --no-verify is not allowed by convention.
+pre-commit:
+  commands:
+    gates:
+      run: just gate
+commit-msg:
+  commands:
+    no-cjk:
+      run: python3 .gates/cjk.py --message {1}
+post-commit:
+  commands:
+    install-tool:
+      run: test "$(git rev-parse --abbrev-ref HEAD)" != main || just install

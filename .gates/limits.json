@@ -1,0 +1,53 @@
+{
+  "encoding": "o200k_base",
+  "limits": {
+    "skill_entry": 4000,
+    "agents": 4000,
+    "markdown": 4000,
+    "code": 8000
+  },
+  "code_extensions": [
+    ".py",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".rs",
+    ".go",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".hpp",
+    ".java",
+    ".kt",
+    ".swift",
+    ".rb",
+    ".php",
+    ".lua",
+    ".pl",
+    ".r",
+    ".sql",
+    ".ps1",
+    ".vue",
+    ".svelte",
+    ".html",
+    ".css",
+    ".scss",
+    ".just",
+    ".toml",
+    ".yml",
+    ".yaml"
+  ],
+  "code_filenames": [
+    "Makefile",
+    "Dockerfile",
+    "Justfile",
+    "justfile"
+  ]
+}

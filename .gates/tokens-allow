@@ -1,0 +1,5 @@
+# Globs (fnmatch, "*" also matches "/") of files exempt from the token size limits.
+# Use it for files whose size the repository does not control: vendored code, an
+# upstream fork that tracks the original project ("*" exempts everything), fixtures.
+# Fork of isac322/kwin-mcp: file sizes follow upstream; do not split upstream files here.
+*

@@ -1,0 +1,9 @@
+# Globs (fnmatch, "*" also matches "/") of files that may contain CJK text.
+# A repository dedicated to CJK documents can allow everything with a single "*".
+i18n/*
+locales/*
+*/i18n/*
+*/locales/*
+*.po
+# Upstream kwin-mcp tests use CJK strings as fixtures (clipboard, text rendering).
+tests/*
