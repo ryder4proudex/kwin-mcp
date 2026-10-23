@@ -169,11 +169,74 @@ def test_same_caption_and_size_still_unmaps_the_whole_app() -> None:
 
 
 def test_a_caption_that_differs_is_not_matched_through_the_buffer() -> None:
-    """Chromium's error page names its frame differently from its KWin caption."""
-    app = _App(3675, [_TopLevel("example.invalid - Network error - Chromium", (1050, 780))])
+    app = _App(3675, [_TopLevel("other.example - Chromium", (1050, 780))])
 
     assert _offsets(app, [_chromium_window("w1", "example.invalid - Chromium")]) == [
         (None, "no-kwin-window")
+    ]
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        # Chromium's error page adds a status segment before the browser name.
+        "example.invalid - Network error - Chromium",
+        # Google Chrome 156 on KWin 6.8.1 with several profiles: the profile name
+        # is appended, and a crashed renderer adds a localized marker.
+        "example.invalid - Chromium - Work",
+        "example.invalid - Crashed - Chromium - Work",
+    ],
+)
+def test_status_segments_chromium_adds_still_match_through_the_buffer(name: str) -> None:
+    app = _App(3675, [_TopLevel(name, (1050, 780)), _TopLevel("", (856, 88))])
+
+    assert _offsets(app, [_chromium_window("w1", "example.invalid - Chromium")]) == [
+        ((115, -2), ""),
+        (None, "no-kwin-window"),
+    ]
+
+
+def test_inactive_and_active_chrome_windows_map_through_their_shadow() -> None:
+    """Observed with Google Chrome 156 on KWin 6.8.1 at scale 1.6: the active window
+    has an asymmetric 16/10/16/32 px shadow, inactive ones 10 px all round."""
+    app = _App(
+        2797633,
+        [
+            _TopLevel("Billing - Google Chrome - Ryder", (1232, 1346)),
+            _TopLevel("", (471, 88)),
+            _TopLevel("RAGFlow - Crashed - Google Chrome - Ryder", (1220, 1324)),
+            _TopLevel("Mail - Crashed - Google Chrome - admin", (1220, 1324)),
+            _TopLevel("Orders - Google Chrome - Ryder", (2400, 1304)),
+        ],
+    )
+    kwin = [
+        _window(
+            2797633,
+            "active",
+            "Billing - Google Chrome",
+            [1200, 0, 1200, 1304],
+            [1184, -10, 1232, 1346],
+        ),
+        _window(
+            2797633,
+            "ragflow",
+            "RAGFlow - Google Chrome",
+            [0, 0, 1200, 1304],
+            [-10, -10, 1220, 1324],
+        ),
+        _window(
+            2797633, "mail", "Mail - Google Chrome", [1200, 0, 1200, 1304], [1190, -10, 1220, 1324]
+        ),
+        # Maximized: no shadow, the buffer is the client rect.
+        _window(2797633, "orders", "Orders - Google Chrome", [0, 0, 2400, 1304]),
+    ]
+
+    assert _offsets(app, kwin) == [
+        ((1184, -10), ""),
+        (None, "no-kwin-window"),
+        ((-10, -10), ""),
+        ((1190, -10), ""),
+        ((0, 0), ""),
     ]
 
 
@@ -182,15 +245,16 @@ def test_a_caption_that_differs_is_not_matched_through_the_buffer() -> None:
 def test_a_caption_only_miss_unmaps_a_same_size_sibling(
     sibling_size: tuple[int, int], named_first: bool
 ) -> None:
-    """The unmatched error-page frame must not leave its window to a sibling.
+    """A frame whose name fails the caption check must not leave its window to a sibling.
 
-    Chromium's error page names its frame differently from its KWin caption,
-    so only the caption check keeps it from its own window. An unnamed
+    A frame named differently from its KWin caption (a title that changed
+    between the two reads) is kept from its own window only by the caption
+    check. An unnamed
     sibling top-level of the same size — carrying the elements a caller
     acts on, such as a button — would otherwise claim that window alone and
     publish its elements with the wrong window's coordinates.
     """
-    named = _TopLevel("example.invalid - Network error - Chromium", sibling_size)
+    named = _TopLevel("other.example - Chromium", sibling_size)
     unnamed = _TopLevel("", sibling_size)
     children = [named, unnamed] if named_first else [unnamed, named]
     app = _App(3675, children)
@@ -219,14 +283,15 @@ def test_windows_matching_through_client_and_buffer_are_ambiguous() -> None:
     )
     kwin = [
         _chromium_window("loaded", "example.org - Chromium"),
-        # Its client rect has the loaded frame's size; the error page's frame
-        # name fails the caption check, so only the geometry tells them apart.
+        # Its client rect has the loaded frame's size, so the loaded frame
+        # matches both windows; the error page's frame matches only this one,
+        # but an ambiguous sibling unmaps the whole application.
         _window(
             3675, "error", "example.org - Chromium", [800, 200, 1050, 780], [784, 190, 1082, 822]
         ),
     ]
 
-    assert _offsets(app, kwin) == [(None, "ambiguous"), (None, "no-kwin-window")]
+    assert _offsets(app, kwin) == [(None, "ambiguous"), (None, "ambiguous-window-match")]
 
 
 def test_an_ambiguous_top_level_unmaps_a_mapped_sibling() -> None:

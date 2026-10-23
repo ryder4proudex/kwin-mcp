@@ -36,7 +36,7 @@ from kwin_mcp.models import Locator, MatchMode
 from kwin_mcp.spoken_name import SpokenNameKey, normalize_spoken_name, spoken_name_matches
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from kwin_mcp.geometry import KWinWindow
 
@@ -197,7 +197,9 @@ class _RefEntry:
     ``role`` is the role at mint time (a changed role makes the ref stale);
     ``application`` is the element's application node and ``toplevel`` its
     depth-1 ancestor (itself at depth 1, None for an application node), from
-    which the live window mapping is recomputed.
+    which the live window mapping is recomputed. ``scale`` is the device-pixel
+    scale of the web document the element sits in (1.0 elsewhere), see
+    :func:`_device_pixel_scale`.
     """
 
     accessible: Atspi.Accessible
@@ -206,6 +208,7 @@ class _RefEntry:
     depth: int
     application: Atspi.Accessible
     toplevel: Atspi.Accessible | None
+    scale: float = 1.0
 
 
 class _StaleRefError(Exception):
@@ -287,6 +290,7 @@ def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
     kwin_before, kwin_error = _kwin_windows()
     found: list[_Found] = []
     mappings_by_app: dict[frozenset[int], list[_WindowMapping]] = {}
+    scales = _OutputScales()
     desktop = Atspi.get_desktop(0)
     for app in _children(desktop):
         try:
@@ -311,7 +315,7 @@ def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
         mappings_by_app.setdefault(pids, []).extend(mappings)
         for toplevel, mapping in zip(toplevels, mappings, strict=True):
             if toplevel is not None:
-                scope = _Scope(app, app_name, toplevel, mapping)
+                scope = _Scope(app, app_name, toplevel, mapping, scales)
                 _collect(toplevel, scope, 1, max_depth, criteria, found)
 
     _apply_stability(mappings_by_app, kwin_before, kwin_error)
@@ -328,6 +332,7 @@ class _Scope:
     app: str
     toplevel: Atspi.Accessible
     mapping: _WindowMapping
+    scales: _OutputScales
 
 
 def _collect(
@@ -337,19 +342,32 @@ def _collect(
     max_depth: int,
     criteria: _Criteria,
     found: list[_Found],
+    scale: float = 1.0,
+    parent_rect: tuple[int, int, int, int] | None = None,
 ) -> None:
-    """Add ``element`` (when it matches) and its matching descendants to ``found``."""
+    """Add ``element`` (when it matches) and its matching descendants to ``found``.
+
+    ``scale`` is the device-pixel scale inherited from an enclosing web
+    document and ``parent_rect`` the parent's window-local logical rectangle.
+    """
     if depth > max_depth:
         return
     try:
         info = _extract_info(element, depth)
     except Exception:
         return
+    if scale == 1.0 and info.role == _WEB_DOCUMENT_ROLE and info.has_extents:
+        rect = (info.x, info.y, info.width, info.height)
+        scale = _device_pixel_scale(rect, parent_rect, scope.scales)
+    _to_logical(info, scale)
     if criteria.matches(info):
-        entry = _RefEntry(element, info.role, scope.app, depth, scope.application, scope.toplevel)
+        entry = _RefEntry(
+            element, info.role, scope.app, depth, scope.application, scope.toplevel, scale
+        )
         found.append(_Found(info, scope.mapping, entry))
+    own_rect = (info.x, info.y, info.width, info.height) if info.has_extents else None
     for child in _children(element, info.children_count):
-        _collect(child, scope, depth + 1, max_depth, criteria, found)
+        _collect(child, scope, depth + 1, max_depth, criteria, found, scale, own_rect)
 
 
 def _children(element: Atspi.Accessible, count: int | None = None) -> list[Atspi.Accessible]:
@@ -482,6 +500,7 @@ def _resolve_refs(refs: list[str]) -> list[_Resolved]:
             continue
         try:
             info = _extract_info(entry.accessible, entry.depth)
+            _to_logical(info, entry.scale)
         except Exception:
             info = None
         if info is None or "defunct" in info.states:
@@ -566,6 +585,7 @@ def _strict_candidates(
     priorities = [wanted.lower()] if isinstance(wanted, str) else [a.lower() for a in wanted]
     candidates: list[_Candidate] = []
     exposed: list[str] = []
+    scales = _OutputScales()
 
     def visit(
         element: Atspi.Accessible,
@@ -573,6 +593,8 @@ def _strict_candidates(
         app_name: str,
         toplevel: Atspi.Accessible | None,
         depth: int,
+        scale: float = 1.0,
+        parent: Atspi.Accessible | None = None,
     ) -> None:
         if depth > _ACTION_SEARCH_MAX_DEPTH:
             msg = f"accessibility subtree deeper than {_ACTION_SEARCH_MAX_DEPTH} levels"
@@ -589,6 +611,10 @@ def _strict_candidates(
             description = element.get_description() or ""
         except Exception as exc:
             raise _IncompleteDiscoveryError(f"could not read element description: {exc}") from exc
+        if scale == 1.0 and role == _WEB_DOCUMENT_ROLE and parent is not None:
+            own_rect = _window_rect(element)
+            if own_rect is not None:
+                scale = _device_pixel_scale(own_rect, _window_rect(parent), scales)
 
         matched = criteria.matches_text(name, role, description)
         if matched and criteria.states:
@@ -626,7 +652,7 @@ def _strict_candidates(
                     (matched_actions[a] for a in priorities if a in matched_actions), None
                 )
                 if chosen is not None:
-                    entry = _RefEntry(element, role, app_name, depth, application, toplevel)
+                    entry = _RefEntry(element, role, app_name, depth, application, toplevel, scale)
                     candidates.append(_Candidate(entry, name, chosen))
 
         try:
@@ -639,7 +665,8 @@ def _strict_candidates(
             except Exception as exc:
                 raise _IncompleteDiscoveryError(f"could not read child: {exc}") from exc
             if child is not None:
-                visit(child, application, app_name, child if depth == 0 else toplevel, depth + 1)
+                child_toplevel = child if depth == 0 else toplevel
+                visit(child, application, app_name, child_toplevel, depth + 1, scale, element)
 
     desktop = Atspi.get_desktop(0)
     try:
@@ -1112,14 +1139,44 @@ def _caption_consistent(caption: str, name: str) -> bool:
     names its AT-SPI frame 'file.txt  — KWrite' (two spaces) while KWin shows
     'file.txt — KWrite'.
 
-    Accepts exact equality or the KDE " — App" suffix KWin shows for KDE apps
-    (AT-SPI 'Open File' vs KWin 'Open File — KWrite'). A plain prefix is never
-    accepted: 'Document' must not match 'Document 2 — KWrite'.
+    Accepts exact equality, the KDE " — App" suffix KWin shows for KDE apps
+    (AT-SPI 'Open File' vs KWin 'Open File — KWrite'), or the status segments
+    Chromium adds to its accessible window name (see
+    :func:`_segments_inserted`). A plain prefix is never accepted: 'Document'
+    must not match 'Document 2 — KWrite'.
     """
     n, c = " ".join(name.split()), " ".join(caption.split())
     if not n or not c:
         return True
-    return c == n or c.startswith(n + " — ")
+    return c == n or c.startswith(n + " — ") or _segments_inserted(c, n)
+
+
+# Chromium joins its window-title parts with " - ".
+_TITLE_SEPARATOR = " - "
+# Profile name, crash or network-error marker, audio indicator: the most status
+# segments Chromium was seen to add to an accessible window name at once is two.
+_MAX_INSERTED_SEGMENTS = 3
+
+
+def _segments_inserted(caption: str, name: str) -> bool:
+    """Whether ``name`` is ``caption`` with a few " - "-separated segments added.
+
+    Chromium names its AT-SPI frame after the window title plus status
+    segments KWin's caption does not carry: the profile name when several
+    profiles exist ('Inbox - Google Chrome - Work' for KWin's 'Inbox - Google
+    Chrome') and a crash or error marker before the browser name ('Inbox -
+    Crashed - Google Chrome - Work'). The caption's segments must appear in the
+    name in order, the first (page title) segment must be the same, and at
+    most ``_MAX_INSERTED_SEGMENTS`` segments may be added. The size check and
+    the uniqueness checks of :func:`_match_toplevel` still apply on top.
+    """
+    caption_parts = caption.split(_TITLE_SEPARATOR)
+    name_parts = name.split(_TITLE_SEPARATOR)
+    added = len(name_parts) - len(caption_parts)
+    if not 0 < added <= _MAX_INSERTED_SEGMENTS or name_parts[0] != caption_parts[0]:
+        return False
+    remaining = iter(name_parts[1:])
+    return all(part in remaining for part in caption_parts[1:])
 
 
 def _window_rect(element: _AccessibleTopLevel) -> tuple[int, int, int, int] | None:
@@ -1132,6 +1189,88 @@ def _window_rect(element: _AccessibleTopLevel) -> tuple[int, int, int, int] | No
         return rect.x, rect.y, rect.width, rect.height
     except Exception:
         return None
+
+
+# ── Device-pixel web content ─────────────────────────────────────────────
+#
+# Chromium on Wayland with a fractional output scale reports the extents of
+# web content (a "document web" node and everything inside it) in device
+# pixels while its own browser UI reports logical pixels: at scale 1.6 the
+# page's document is 1.6 times the size of the logical panel that holds it.
+# Such a document is recognised by that ratio, which must equal one of KWin's
+# output scales in both dimensions, and its subtree is divided by the scale.
+
+_WEB_DOCUMENT_ROLE = "document web"
+# Rounding of the parent's logical size and of the document's device size
+# leaves up to about 1.5 px of error at scale 2; a coincidental size ratio is
+# far less precise than that.
+_DEVICE_PIXEL_SLACK = 2
+
+
+class _OutputScales:
+    """KWin's output scales, read at most once per walk and only when needed."""
+
+    def __init__(self) -> None:
+        self._scales: tuple[float, ...] | None = None
+
+    def __call__(self) -> tuple[float, ...]:
+        if self._scales is None:
+            self._scales = _read_output_scales()
+        return self._scales
+
+
+def _read_output_scales() -> tuple[float, ...]:
+    """The scale of every KWin output; empty when KWin cannot be asked."""
+    try:
+        from kwin_mcp import geometry
+
+        screens = geometry.outputs()["screens"]
+        if not isinstance(screens, list):
+            return ()
+        return tuple(float(screen["scale"]) for screen in screens)
+    except Exception:
+        return ()
+
+
+def _device_pixel_scale(
+    rect: tuple[int, int, int, int],
+    parent_rect: tuple[int, int, int, int] | None,
+    scales: Callable[[], tuple[float, ...]],
+) -> float:
+    """The output scale a web document's extents are in, or 1.0 for logical px.
+
+    ``rect`` is the document's window-local rectangle and ``parent_rect`` its
+    parent's, in logical px. A document the size of its parent times an output
+    scale other than 1 (within ``_DEVICE_PIXEL_SLACK`` px per dimension) is in
+    device pixels; KWin is only asked for its scales when the sizes differ.
+    """
+    if parent_rect is None:
+        return 1.0
+    width, height = rect[2], rect[3]
+    parent_width, parent_height = parent_rect[2], parent_rect[3]
+    if min(width, height, parent_width, parent_height) <= 0:
+        return 1.0
+    if abs(width - parent_width) <= _DEVICE_PIXEL_SLACK:
+        return 1.0
+    for scale in scales():
+        if scale <= 0 or scale == 1.0:
+            continue
+        if (
+            abs(width - parent_width * scale) <= _DEVICE_PIXEL_SLACK
+            and abs(height - parent_height * scale) <= _DEVICE_PIXEL_SLACK
+        ):
+            return scale
+    return 1.0
+
+
+def _to_logical(info: ElementInfo, scale: float) -> None:
+    """Divide device-pixel extents by ``scale`` in place (no-op at 1.0)."""
+    if scale == 1.0 or not info.has_extents:
+        return
+    info.x = round(info.x / scale)
+    info.y = round(info.y / scale)
+    info.width = round(info.width / scale)
+    info.height = round(info.height / scale)
 
 
 def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:

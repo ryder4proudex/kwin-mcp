@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Google Chrome and Chromium elements on a live desktop no longer all report `unavailable (no-kwin-window)`. A top-level window now matches its KWin caption when its AT-SPI name adds up to three ` - ` segments after the page title (the profile name, a crash or network-error marker), and web content that Chromium reports in device pixels at a fractional output scale is divided by the output scale, so element rectangles, `{ref}` targets and `element_act` results line up with KWin geometry. Observed with Google Chrome 156 on KWin 6.8.1 at scale 1.6.
 - The E2E input-option matrix counts the physical press/release pairs received for the tested click-option cases independently of GTK's multi-click settings, avoiding false failures when GTK groups clicks across calls.
 - E2E CI shares stable, same-run image and shard-status artifacts across partial reruns. Each row checks its latest build and shard job results before validating coverage, so an older success cannot hide a newer failure. Diagnostic archives remain attempt-specific.
 - The OpenCode integration uses the V2 `Plugin.define` and `plugins` configuration to register the `kwin-mcp` MCP server and bundled `kwin-desktop-automation` skill automatically while preserving existing user entries. OpenCode V1 is unsupported.

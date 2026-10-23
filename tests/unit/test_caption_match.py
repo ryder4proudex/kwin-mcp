@@ -50,3 +50,41 @@ def test_unrelated_captions_do_not_match(caption: str, name: str) -> None:
 def test_empty_side_skips_the_check() -> None:
     assert _caption_consistent("", "kwin-mcp-scroll.txt  — KWrite")
     assert _caption_consistent("kwin-mcp-scroll.txt — KWrite", "   ")
+
+
+@pytest.mark.parametrize(
+    ("caption", "name"),
+    [
+        # Google Chrome with several profiles appends the profile name.
+        ("Inbox - Google Chrome", "Inbox - Google Chrome - Work"),
+        # A crashed renderer adds a (localized) marker before the browser name.
+        ("Inbox - Google Chrome", "Inbox - Crashed - Google Chrome - Work"),
+        # Titles that contain the separator themselves.
+        ("Admin settings - Claude - Google Chrome", "Admin settings - Claude - Google Chrome - W"),
+        # Chromium's error page.
+        ("example.invalid - Chromium", "example.invalid - Network error - Chromium"),
+        # Lark documents carry zero-width marks; both sides carry the same ones.
+        ("‌​Doc - Lark - Google Chrome", "‌​Doc - Lark - Google Chrome - Work"),
+    ],
+)
+def test_chromium_status_segments_match(caption: str, name: str) -> None:
+    assert _caption_consistent(caption, name)
+
+
+@pytest.mark.parametrize(
+    ("caption", "name"),
+    [
+        # A different page title in the same browser and profile.
+        ("Outbox - Google Chrome", "Inbox - Google Chrome - Work"),
+        # The page title must be the first segment, not any segment.
+        ("Google Chrome", "Inbox - Google Chrome - Work"),
+        # Caption segments out of order.
+        ("Inbox - Work - Google Chrome", "Inbox - Google Chrome - Work"),
+        # More added segments than Chromium was seen to add.
+        ("Inbox - Google Chrome", "Inbox - a - b - c - Google Chrome - Work"),
+        # The caption has more segments than the name.
+        ("Inbox - Google Chrome - Work", "Inbox - Google Chrome"),
+    ],
+)
+def test_other_segment_changes_do_not_match(caption: str, name: str) -> None:
+    assert not _caption_consistent(caption, name)
