@@ -39,6 +39,7 @@ from kwin_mcp.input import (
 from kwin_mcp.models import (
     ANY_ELEMENT,
     DEFAULT_MAX_NODES,
+    DEFAULT_TEXT_MAX_CHARS,
     NO_RETENTION,
     AccessibilityState,
     AppLaunchResult,
@@ -377,6 +378,48 @@ def _walk_fields(walk: object, max_nodes: int) -> dict[str, Any]:
         "truncated": walk.get("truncated") or None,
         "max_nodes": max_nodes,
     }
+
+
+def _check_output_file(path: str) -> Path:
+    """Validate an element_query ``output_file`` before any walk runs."""
+    target = Path(path)
+    if not target.is_absolute() or target.suffix != ".jsonl":
+        msg = f"output_file must be an absolute path ending in .jsonl, got {path!r}"
+        raise ValueError(msg)
+    if not target.parent.is_dir():
+        msg = f"output_file directory does not exist: {str(target.parent)!r}"
+        raise ValueError(msg)
+    with contextlib.suppress(FileNotFoundError):
+        if not stat.S_ISREG(target.lstat().st_mode):
+            msg = f"output_file exists and is not a regular file: {path!r}"
+            raise ValueError(msg)
+    return target
+
+
+def _write_jsonl(target: Path, elements: list[UIElement]) -> int:
+    """Write one JSON object per element to ``target`` (mode 0600); returns the byte count.
+
+    Symlinks are refused (``O_NOFOLLOW``) and an existing file is truncated
+    only after it proves to be a regular file, which then becomes 0600 too.
+    """
+    data = "".join(
+        json.dumps(element.model_dump(mode="json"), ensure_ascii=False) + "\n"
+        for element in elements
+    ).encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        fd = os.open(target, flags, 0o600)
+    except OSError as exc:
+        msg = f"Cannot write output_file {str(target)!r}: {exc.strerror or exc}"
+        raise ValueError(msg) from exc
+    with os.fdopen(fd, "wb") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            msg = f"output_file exists and is not a regular file: {str(target)!r}"
+            raise ValueError(msg)
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        handle.write(data)
+    return len(data)
 
 
 def _rect_tuple(rect: Rect | None) -> tuple[int, int, int, int] | None:
@@ -1219,22 +1262,47 @@ class AutomationEngine:
         max_depth: int | None = None,
         wait: Wait | None = None,
         max_nodes: int = DEFAULT_MAX_NODES,
+        window: WindowSelector | None = None,
+        text_max_chars: int = DEFAULT_TEXT_MAX_CHARS,
+        output_file: str | None = None,
     ) -> ElementList:
         """Return AT-SPI2 elements matching locator, in pre-order; with wait, poll first.
 
         ``max_depth`` None walks every depth; the walk stops at ``max_nodes``
         nodes (``<= 0``: no node cap) or the worker's time budget and then
-        reports itself truncated.
+        reports itself truncated. ``window`` limits the walk to the top-levels
+        of the matching KWin windows; ``text_max_chars <= 0`` returns Text
+        content whole; ``output_file`` writes the elements there as JSONL
+        instead of returning them.
         """
+        if window is not None:
+            _check_selector(window)
+        target = None if output_file is None else _check_output_file(output_file)
         self._require_session()
+        window_ids: list[str] | None = None
+        if window is not None:
+            windows = self._windows()
+            matches = select_windows(windows, window)
+            if not matches:
+                select_one(windows, window)  # raises the no-match error
+            window_ids = [w.id for w in matches]
+        walk_args: dict[str, Any] = {
+            "locator": locator.model_dump(),
+            "max_depth": max_depth,
+            "max_nodes": max_nodes,
+            "text_max_chars": text_max_chars,
+            "window_ids": window_ids,
+        }
         if wait is None:
-            resp = self._run_atspi(
-                "query", locator=locator.model_dump(), max_depth=max_depth, max_nodes=max_nodes
-            )
+            resp = self._run_atspi("query", **walk_args)
             elements = [UIElement.from_worker(el) for el in self._atspi_result(resp)]
-            return ElementList(
-                locator=locator, elements=elements, **_walk_fields(resp.get("walk"), max_nodes)
+            result = ElementList(
+                locator=locator,
+                elements=elements,
+                window_ids=window_ids,
+                **_walk_fields(resp.get("walk"), max_nodes),
             )
+            return self._written(result, target)
 
         timeout_ms = wait.timeout_ms
         description = f"Waiting for {locator.describe()}"
@@ -1258,15 +1326,13 @@ class AutomationEngine:
             "wait",
             heartbeat=heartbeat,
             timeout_s=max(timeout_ms, 0) / 1000 + _ATSPI_TIMEOUT_S,
-            locator=locator.model_dump(),
-            max_depth=max_depth,
-            max_nodes=max_nodes,
+            **walk_args,
             until=wait.until,
             timeout_ms=timeout_ms,
             poll_interval_ms=max(wait.poll_interval_ms, 0),
         )
         result = self._atspi_result(resp)
-        return ElementList(
+        waited = ElementList(
             locator=locator,
             elements=[UIElement.from_worker(el) for el in result["elements"]],
             wait=ElementWaitResult(
@@ -1275,7 +1341,24 @@ class AutomationEngine:
                 satisfied=bool(result["satisfied"]),
                 elapsed_ms=int(result["elapsed_ms"]),
             ),
+            window_ids=window_ids,
             **_walk_fields(result.get("walk"), max_nodes),
+        )
+        return self._written(waited, target)
+
+    @staticmethod
+    def _written(result: ElementList, target: Path | None) -> ElementList:
+        """``result`` as returned, or with its elements moved to the JSONL ``target``."""
+        if target is None:
+            return result
+        size = _write_jsonl(target, result.elements)
+        return result.model_copy(
+            update={
+                "elements": [],
+                "output_file": str(target),
+                "output_count": len(result.elements),
+                "output_bytes": size,
+            }
         )
 
     def element_act(

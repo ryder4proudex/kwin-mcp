@@ -83,6 +83,7 @@ from kwin_mcp.input import abort_waits
 from kwin_mcp.models import (
     ANY_ELEMENT,
     DEFAULT_MAX_NODES,
+    DEFAULT_TEXT_MAX_CHARS,
     NO_RETENTION,
     ActionResult,
     AppLaunchResult,
@@ -724,10 +725,27 @@ def element_query(
         int,
         Field(description="Stop the walk after this many nodes (0 = no cap); truncated says so."),
     ] = DEFAULT_MAX_NODES,
+    window: Annotated[
+        WindowSelector | None,
+        Field(description="Only the top-level(s) of the matching KWin windows (window_list)."),
+    ] = None,
+    text_max_chars: Annotated[
+        int, Field(description="Cap each element's text (0 = whole text).")
+    ] = DEFAULT_TEXT_MAX_CHARS,
+    output_file: Annotated[
+        str | None,
+        Field(description="Absolute .jsonl path: write elements there (0600), return a summary."),
+    ] = None,
 ) -> ElementList:
     """Return AT-SPI2 elements matching locator (pre-order) with rects, states, actions, window_id and a ref for targets. With wait, poll until present/absent."""  # noqa: E501
     return engine.element_query(
-        locator=locator, max_depth=max_depth, wait=wait, max_nodes=max_nodes
+        locator=locator,
+        max_depth=max_depth,
+        wait=wait,
+        max_nodes=max_nodes,
+        window=window,
+        text_max_chars=text_max_chars,
+        output_file=output_file,
     )
 
 

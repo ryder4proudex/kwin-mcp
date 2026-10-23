@@ -460,6 +460,10 @@ class ElementWaitResult(BaseModel):
 # 40-window browser was about 15,000 nodes; a window-scoped walk is far smaller.
 DEFAULT_MAX_NODES = 20_000
 
+# Default cap on each element's Text content (editors expose whole documents
+# through it), so a tree dump stays readable; element_query can lift it.
+DEFAULT_TEXT_MAX_CHARS = 200
+
 # Why a walk stopped before reading every node in its scope.
 WalkTruncation = Literal["max_nodes", "time"]
 
@@ -469,6 +473,9 @@ class ElementList(BaseModel):
 
     ``visited`` is the number of nodes the (last) walk read; ``truncated`` says
     which bound stopped it early, null when every node in scope was read.
+    ``window_ids`` are the KWin windows a scoped walk was limited to. With
+    ``output_file`` the elements were written there as JSONL instead
+    (``output_count`` lines, ``output_bytes`` bytes) and ``elements`` is empty.
     """
 
     locator: Locator = Field(default_factory=Locator)
@@ -477,6 +484,10 @@ class ElementList(BaseModel):
     visited: int = 0
     truncated: WalkTruncation | None = None
     max_nodes: int = 0
+    window_ids: list[str] | None = None
+    output_file: str | None = None
+    output_count: int = 0
+    output_bytes: int = 0
 
     def _truncation_line(self) -> str:
         if self.truncated == "max_nodes":
@@ -489,15 +500,27 @@ class ElementList(BaseModel):
         )
 
     def _listing(self) -> str:
+        scope = f" in window {', '.join(self.window_ids)}" if self.window_ids else ""
+        matching = "" if self.locator.is_empty() else f" matching {self.locator.describe()}"
+        if self.output_file is not None:
+            return (
+                f"Wrote {self.output_count} elements{matching}{scope} as JSONL to "
+                f"{self.output_file} ({self.output_bytes} bytes)."
+            )
+        if not self.elements and self.window_ids:
+            return (
+                f"No elements found{matching}{scope}. A window whose AT-SPI top-level "
+                "does not map to it (see unavailable in an unscoped element_query) "
+                "cannot be scoped."
+            )
         if self.locator.is_empty():
             if not self.elements:
                 return "(no accessible applications found)"
-            header = f"# Accessibility Tree ({len(self.elements)} elements)\n"
+            header = f"# Accessibility Tree{scope} ({len(self.elements)} elements)\n"
         else:
-            desc = self.locator.describe()
             if not self.elements:
-                return f"No elements found matching {desc}"
-            header = f"Found {len(self.elements)} elements matching {desc}:\n"
+                return f"No elements found{matching}"
+            header = f"Found {len(self.elements)} elements{matching}{scope}:\n"
         return "\n".join([header, *_element_lines(self.elements)])
 
     def render(self) -> str:

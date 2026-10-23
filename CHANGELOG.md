@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `element_query` can be scoped to one window and write large trees to a file. `window` takes a `WindowSelector` (as in `window_list`) and limits the walk to the AT-SPI top-levels mapped to the matching KWin windows, so one Chrome window is read without the other windows of the browser. `text_max_chars` sets the per-element text cap (default 200, `0` = whole text). `output_file` writes the elements as JSONL (one object per element, mode `0600`, symlinks refused) to an absolute `.jsonl` path and returns only a summary (`output_file`, `output_count`, `output_bytes`). The README documents `locator={"states": ["showing"]}` for on-screen elements only.
+
 ### Changed
 
 - `element_query` no longer stops at depth 15: `max_depth` defaults to `null` (every depth), and the walk is bounded by the new `max_nodes` parameter (default 20000, `0` = no cap) and a 20 s time budget instead. A walk that hits a bound returns what it found with `truncated` (`"max_nodes"` or `"time"`), the `visited` node count and a `TRUNCATED:` line; a truncated walk never satisfies `wait={until:"absent"}`. Controls of web apps in Chrome sit around depth 20 and were invisible to queries and waits before.

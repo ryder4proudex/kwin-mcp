@@ -966,13 +966,56 @@
      "default": 20000,
      "description": "Stop the walk after this many nodes (0 = no cap); truncated says so.",
      "type": "integer"
+    },
+    "window": {
+     "additionalProperties": false,
+     "description": "Only the top-level(s) of the matching KWin windows (window_list). AND-ed filters over all windows; mutators need exactly one match (errors list ids and kinds).",
+     "properties": {
+      "id": {
+       "type": "string"
+      },
+      "app_id": {
+       "type": "string"
+      },
+      "caption": {
+       "type": "string"
+      },
+      "active": {
+       "type": "boolean"
+      },
+      "kind": {
+       "items": {
+        "enum": [
+         "normal",
+         "dialog",
+         "utility",
+         "popup",
+         "shell",
+         "other"
+        ],
+        "type": "string"
+       },
+       "minItems": 1,
+       "type": "array"
+      }
+     },
+     "type": "object"
+    },
+    "text_max_chars": {
+     "default": 200,
+     "description": "Cap each element's text (0 = whole text).",
+     "type": "integer"
+    },
+    "output_file": {
+     "type": "string",
+     "description": "Absolute .jsonl path: write elements there (0600), return a summary."
     }
    },
    "type": "object",
    "additionalProperties": false
   },
   "outputSchema": {
-   "description": "Elements matching the locator, in pre-order.\n\n``visited`` is the number of nodes the (last) walk read; ``truncated`` says\nwhich bound stopped it early, null when every node in scope was read.",
+   "description": "Elements matching the locator, in pre-order.\n\n``visited`` is the number of nodes the (last) walk read; ``truncated`` says\nwhich bound stopped it early, null when every node in scope was read.\n``window_ids`` are the KWin windows a scoped walk was limited to. With\n``output_file`` the elements were written there as JSONL instead\n(``output_count`` lines, ``output_bytes`` bytes) and ``elements`` is empty.",
    "properties": {
     "locator": {
      "additionalProperties": false,
@@ -1229,6 +1272,39 @@
      "default": null
     },
     "max_nodes": {
+     "default": 0,
+     "type": "integer"
+    },
+    "window_ids": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "output_file": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "output_count": {
+     "default": 0,
+     "type": "integer"
+    },
+    "output_bytes": {
      "default": 0,
      "type": "integer"
     }

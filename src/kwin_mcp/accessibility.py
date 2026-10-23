@@ -8,7 +8,8 @@ worker per session bus and bumps ``N`` on every (re)spawn.
 Operations (``op``):
 
 - ``query``: one filtered pre-order walk (``locator``, ``max_depth``,
-  ``max_nodes``), bounded by node count and time.
+  ``max_nodes``, ``text_max_chars``), bounded by node count and time and
+  optionally scoped to the top-levels of some KWin windows (``window_ids``).
 - ``wait``: ``query`` polled until the matches are present or absent.
 - ``resolve``: live element data for refs minted by ``query``/``wait``.
 - ``action``: invoke one AT-SPI action on a ref, or on the single
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import gi
 
-from kwin_mcp.models import DEFAULT_MAX_NODES, Locator, MatchMode
+from kwin_mcp.models import DEFAULT_MAX_NODES, DEFAULT_TEXT_MAX_CHARS, Locator, MatchMode
 from kwin_mcp.spoken_name import SpokenNameKey, normalize_spoken_name, spoken_name_matches
 
 if TYPE_CHECKING:
@@ -44,9 +45,7 @@ if TYPE_CHECKING:
 gi.require_version("Atspi", "2.0")
 from gi.repository import Atspi  # noqa: E402
 
-# Elements such as editors expose their whole document through the Text
-# interface; cap it so a tree dump stays readable.
-_MAX_TEXT_CHARS = 200
+_MAX_TEXT_CHARS = DEFAULT_TEXT_MAX_CHARS
 
 
 @dataclass
@@ -288,17 +287,22 @@ _WALK_TIME_BUDGET_S = 20.0
 
 @dataclass
 class _WalkLimits:
-    """The bounds of one walk and what it visited.
+    """The bounds and scope of one walk, and what it visited.
 
     ``max_depth`` None visits every depth; ``<= 0`` visits application nodes
-    only. ``max_nodes <= 0`` lifts the node cap. ``visited`` counts the nodes
-    read; ``truncated`` is ``"max_nodes"`` or ``"time"`` when a bound stopped
-    the walk before every node in its scope was read, else empty.
+    only. ``max_nodes <= 0`` lifts the node cap. ``text_max_chars`` caps each
+    element's Text content (``<= 0``: no cap). ``windows``, when set, keeps
+    the walk inside the AT-SPI top-levels mapped to those KWin window ids
+    (and their applications' nodes). ``visited`` counts the nodes read;
+    ``truncated`` is ``"max_nodes"`` or ``"time"`` when a bound stopped the
+    walk before every node in its scope was read, else empty.
     """
 
     max_depth: int | None = None
     max_nodes: int = DEFAULT_MAX_NODES
     time_budget_s: float = _WALK_TIME_BUDGET_S
+    text_max_chars: int = _MAX_TEXT_CHARS
+    windows: frozenset[str] | None = None
     visited: int = 0
     truncated: str = ""
     deadline: float = 0.0
@@ -328,6 +332,19 @@ class _WalkLimits:
         return {"visited": self.visited, "truncated": self.truncated}
 
 
+class _ScopeUnavailableError(Exception):
+    """A window-scoped walk cannot tell which top-levels belong to the window."""
+
+
+def _owns_window(app: Atspi.Accessible, kwin: list[KWinWindow], pids: frozenset[int]) -> bool:
+    """Whether the application ``app`` may own a KWin window of one of ``pids``."""
+    try:
+        pid = int(app.get_process_id())
+    except Exception:
+        return False
+    return pid > 0 and not _window_pids(pid, kwin).isdisjoint(pids)
+
+
 def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
     """One filtered pre-order walk from the application nodes (depth 0).
 
@@ -335,10 +352,20 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
     stops at ``limits.max_nodes`` nodes or its time budget (``limits`` then
     records why). Non-matching elements are hidden but their children are
     still searched. A node that cannot be read is skipped with its subtree;
-    applications without children are included.
+    applications without children are included. A window-scoped walk
+    (``limits.windows``) skips applications that own none of those windows
+    and top-levels not mapped to one of them; it raises
+    ``_ScopeUnavailableError`` when KWin's window list cannot be read.
     """
     limits.start()
     kwin_before, kwin_error = _kwin_windows()
+    scoped = limits.windows is not None
+    target_pids: frozenset[int] = frozenset()
+    if limits.windows is not None:
+        if kwin_error:
+            msg = f"Cannot scope the walk to a window: KWin window list unavailable ({kwin_error})"
+            raise _ScopeUnavailableError(msg)
+        target_pids = frozenset(w["pid"] for w in kwin_before if w["id"] in limits.windows)
     found: list[_Found] = []
     mappings_by_app: dict[frozenset[int], list[_WindowMapping]] = {}
     scales = _OutputScales()
@@ -350,31 +377,47 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
             continue
         if not criteria.matches_app(app_name):
             continue
+        if scoped and not _owns_window(app, kwin_before, target_pids):
+            continue
         if not limits.admit():
             break
         try:
-            app_info = _extract_info(app, 0)
+            app_info = _extract_info(app, 0, limits.text_max_chars)
         except Exception:
             continue
+        selected: list[tuple[Atspi.Accessible, _WindowMapping]] = []
+        if scoped or limits.allows_depth(1):
+            try:
+                pids, mappings, toplevels = _resolve_app(app, kwin_before, kwin_error)
+            except Exception:
+                # Unscoped, the application node is still listed without its windows.
+                pids, mappings, toplevels = frozenset(), [], []
+            mappings_by_app.setdefault(pids, []).extend(mappings)
+            selected = [
+                (toplevel, mapping)
+                for toplevel, mapping in zip(toplevels, mappings, strict=True)
+                if toplevel is not None and _in_scope(mapping, limits.windows)
+            ]
+            if scoped and not selected:
+                continue
         if criteria.matches(app_info):
             entry = _RefEntry(app, app_info.role, app_name, 0, app, None)
             found.append(_Found(app_info, _UNMAPPED, entry))
         if not limits.allows_depth(1):
             continue
-        try:
-            pids, mappings, toplevels = _resolve_app(app, kwin_before, kwin_error)
-        except Exception:
-            continue
-        mappings_by_app.setdefault(pids, []).extend(mappings)
-        for toplevel, mapping in zip(toplevels, mappings, strict=True):
-            if toplevel is not None:
-                scope = _Scope(app, app_name, toplevel, mapping, scales)
-                _collect(toplevel, scope, limits, criteria, found)
+        for toplevel, mapping in selected:
+            scope = _Scope(app, app_name, toplevel, mapping, scales)
+            _collect(toplevel, scope, limits, criteria, found)
 
     _apply_stability(mappings_by_app, kwin_before, kwin_error)
     for item in found:
         _finalize(item.info, item.mapping)
     return found
+
+
+def _in_scope(mapping: _WindowMapping, windows: frozenset[str] | None) -> bool:
+    """Whether a top-level with ``mapping`` lies in a walk scoped to ``windows``."""
+    return windows is None or (mapping.window is not None and mapping.window["id"] in windows)
 
 
 @dataclass(frozen=True)
@@ -413,7 +456,7 @@ def _collect(
         if not limits.admit():
             return
         try:
-            info = _extract_info(element, depth)
+            info = _extract_info(element, depth, limits.text_max_chars)
         except Exception:
             continue
         if scale == 1.0 and info.role == _WEB_DOCUMENT_ROLE and info.has_extents:
@@ -1346,8 +1389,14 @@ def _to_logical(info: ElementInfo, scale: float) -> None:
     info.height = round(info.height / scale)
 
 
-def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
-    """Extract information from an AT-SPI accessible element."""
+def _extract_info(
+    element: Atspi.Accessible, depth: int, text_max_chars: int = _MAX_TEXT_CHARS
+) -> ElementInfo:
+    """Extract information from an AT-SPI accessible element.
+
+    The Text content is cut at ``text_max_chars`` characters (marked with an
+    ellipsis); ``<= 0`` reads it whole.
+    """
     role = element.get_role_name() or "unknown"
     name = element.get_name() or ""
     description = element.get_description() or ""
@@ -1392,8 +1441,9 @@ def _extract_info(element: Atspi.Accessible, depth: int) -> ElementInfo:
             # accessible returns an empty string on this PyGObject version.
             count = Atspi.Text.get_character_count(text_iface)
             if count:
-                text = Atspi.Text.get_text(text_iface, 0, min(count, _MAX_TEXT_CHARS))
-                if count > _MAX_TEXT_CHARS:
+                end = count if text_max_chars <= 0 else min(count, text_max_chars)
+                text = Atspi.Text.get_text(text_iface, 0, end)
+                if end < count:
                     text += "…"
     except Exception:
         pass
@@ -1438,11 +1488,18 @@ def _locator(request: dict[str, Any]) -> Locator:
 
 
 def _limits(request: dict[str, Any]) -> _WalkLimits:
-    """Walk bounds of a query/wait request; a missing or null max_depth is unlimited."""
+    """Walk bounds and scope of a query/wait request.
+
+    A missing or null ``max_depth`` is unlimited; a missing or null
+    ``window_ids`` leaves the walk unscoped.
+    """
     max_depth = request.get("max_depth")
+    window_ids = request.get("window_ids")
     return _WalkLimits(
         max_depth=None if max_depth is None else int(max_depth),
         max_nodes=int(request.get("max_nodes", DEFAULT_MAX_NODES)),
+        text_max_chars=int(request.get("text_max_chars", _MAX_TEXT_CHARS)),
+        windows=None if window_ids is None else frozenset(str(i) for i in window_ids),
     )
 
 
@@ -1456,17 +1513,23 @@ def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
     op = request.get("op", "")
 
     if op == "query":
-        elements, walk = query_elements(_locator(request), _limits(request))
+        try:
+            elements, walk = query_elements(_locator(request), _limits(request))
+        except _ScopeUnavailableError as exc:
+            return {"ok": False, "error": str(exc)}
         return {"ok": True, "result": elements, "walk": walk}
 
     if op == "wait":
-        result = wait_elements(
-            _locator(request),
-            _limits(request),
-            until=str(request.get("until", "present")),
-            timeout_ms=int(request.get("timeout_ms", 5000)),
-            poll_interval_ms=int(request.get("poll_interval_ms", 200)),
-        )
+        try:
+            result = wait_elements(
+                _locator(request),
+                _limits(request),
+                until=str(request.get("until", "present")),
+                timeout_ms=int(request.get("timeout_ms", 5000)),
+                poll_interval_ms=int(request.get("poll_interval_ms", 200)),
+            )
+        except _ScopeUnavailableError as exc:
+            return {"ok": False, "error": str(exc)}
         return {"ok": True, "result": result}
 
     if op == "resolve":

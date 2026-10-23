@@ -288,6 +288,24 @@
      "required": false,
      "default": 20000,
      "description": "Stop the walk after this many nodes (0 = no cap); truncated says so."
+    },
+    {
+     "name": "window",
+     "required": false,
+     "default": null,
+     "description": "Only the top-level(s) of the matching KWin windows (window_list)."
+    },
+    {
+     "name": "text_max_chars",
+     "required": false,
+     "default": 200,
+     "description": "Cap each element's text (0 = whole text)."
+    },
+    {
+     "name": "output_file",
+     "required": false,
+     "default": null,
+     "description": "Absolute .jsonl path: write elements there (0600), return a summary."
     }
    ],
    "output": [
@@ -296,7 +314,11 @@
     "wait",
     "visited",
     "truncated",
-    "max_nodes"
+    "max_nodes",
+    "window_ids",
+    "output_file",
+    "output_count",
+    "output_bytes"
    ]
   },
   {
