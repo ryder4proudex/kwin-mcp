@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `element_query` no longer stops at depth 15: `max_depth` defaults to `null` (every depth), and the walk is bounded by the new `max_nodes` parameter (default 20000, `0` = no cap) and a 20 s time budget instead. A walk that hits a bound returns what it found with `truncated` (`"max_nodes"` or `"time"`), the `visited` node count and a `TRUNCATED:` line; a truncated walk never satisfies `wait={until:"absent"}`. Controls of web apps in Chrome sit around depth 20 and were invisible to queries and waits before.
+
 ### Fixed
 
 - Google Chrome and Chromium elements on a live desktop no longer all report `unavailable (no-kwin-window)`. A top-level window now matches its KWin caption when its AT-SPI name adds up to three ` - ` segments after the page title (the profile name, a crash or network-error marker), and web content that Chromium reports in device pixels at a fractional output scale is divided by the output scale, so element rectangles, `{ref}` targets and `element_act` results line up with KWin geometry. Observed with Google Chrome 156 on KWin 6.8.1 at scale 1.6.

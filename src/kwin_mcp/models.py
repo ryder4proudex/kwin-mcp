@@ -456,12 +456,37 @@ class ElementWaitResult(BaseModel):
         )
 
 
+# Default node budget of one element_query walk. A whole desktop with a
+# 40-window browser was about 15,000 nodes; a window-scoped walk is far smaller.
+DEFAULT_MAX_NODES = 20_000
+
+# Why a walk stopped before reading every node in its scope.
+WalkTruncation = Literal["max_nodes", "time"]
+
+
 class ElementList(BaseModel):
-    """Elements matching the locator, in pre-order."""
+    """Elements matching the locator, in pre-order.
+
+    ``visited`` is the number of nodes the (last) walk read; ``truncated`` says
+    which bound stopped it early, null when every node in scope was read.
+    """
 
     locator: Locator = Field(default_factory=Locator)
     elements: list[UIElement]
     wait: ElementWaitResult | None = None
+    visited: int = 0
+    truncated: WalkTruncation | None = None
+    max_nodes: int = 0
+
+    def _truncation_line(self) -> str:
+        if self.truncated == "max_nodes":
+            reason = f"max_nodes={self.max_nodes}"
+        else:
+            reason = "the time budget"
+        return (
+            f"TRUNCATED: the walk stopped at {reason} after {self.visited} nodes; "
+            "narrow locator.app or max_depth, or raise max_nodes."
+        )
 
     def _listing(self) -> str:
         if self.locator.is_empty():
@@ -482,6 +507,8 @@ class ElementList(BaseModel):
         satisfied wait reports its elapsed time last.
         """
         parts = [self._listing()]
+        if self.truncated is not None:
+            parts.append(self._truncation_line())
         if self.wait is not None:
             if self.wait.satisfied:
                 parts.append(self.wait.render())

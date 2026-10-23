@@ -7,7 +7,8 @@ worker per session bus and bumps ``N`` on every (re)spawn.
 
 Operations (``op``):
 
-- ``query``: one filtered pre-order walk (``locator``, ``max_depth``).
+- ``query``: one filtered pre-order walk (``locator``, ``max_depth``,
+  ``max_nodes``), bounded by node count and time.
 - ``wait``: ``query`` polled until the matches are present or absent.
 - ``resolve``: live element data for refs minted by ``query``/``wait``.
 - ``action``: invoke one AT-SPI action on a ref, or on the single
@@ -32,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import gi
 
-from kwin_mcp.models import Locator, MatchMode
+from kwin_mcp.models import DEFAULT_MAX_NODES, Locator, MatchMode
 from kwin_mcp.spoken_name import SpokenNameKey, normalize_spoken_name, spoken_name_matches
 
 if TYPE_CHECKING:
@@ -279,14 +280,64 @@ class _Found:
     entry: _RefEntry
 
 
-def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
+# A walk stops (and reports itself truncated) after this long, well inside the
+# engine's 30 s request timeout, so a slow application yields a partial
+# result instead of a killed worker.
+_WALK_TIME_BUDGET_S = 20.0
+
+
+@dataclass
+class _WalkLimits:
+    """The bounds of one walk and what it visited.
+
+    ``max_depth`` None visits every depth; ``<= 0`` visits application nodes
+    only. ``max_nodes <= 0`` lifts the node cap. ``visited`` counts the nodes
+    read; ``truncated`` is ``"max_nodes"`` or ``"time"`` when a bound stopped
+    the walk before every node in its scope was read, else empty.
+    """
+
+    max_depth: int | None = None
+    max_nodes: int = DEFAULT_MAX_NODES
+    time_budget_s: float = _WALK_TIME_BUDGET_S
+    visited: int = 0
+    truncated: str = ""
+    deadline: float = 0.0
+
+    def start(self) -> None:
+        """Reset the counters and start the clock for a new walk."""
+        self.visited, self.truncated = 0, ""
+        self.deadline = time.monotonic() + self.time_budget_s
+
+    def allows_depth(self, depth: int) -> bool:
+        return self.max_depth is None or depth <= self.max_depth
+
+    def admit(self) -> bool:
+        """Count one more node, or stop the walk when a bound is reached."""
+        if self.truncated:
+            return False
+        if 0 < self.max_nodes <= self.visited:
+            self.truncated = "max_nodes"
+            return False
+        if time.monotonic() >= self.deadline:
+            self.truncated = "time"
+            return False
+        self.visited += 1
+        return True
+
+    def report(self) -> dict[str, Any]:
+        return {"visited": self.visited, "truncated": self.truncated}
+
+
+def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
     """One filtered pre-order walk from the application nodes (depth 0).
 
-    Elements deeper than ``max_depth`` are not visited (``<= 0``: application
-    nodes only). Non-matching elements are hidden but their children are
+    Elements deeper than ``limits.max_depth`` are not visited, and the walk
+    stops at ``limits.max_nodes`` nodes or its time budget (``limits`` then
+    records why). Non-matching elements are hidden but their children are
     still searched. A node that cannot be read is skipped with its subtree;
     applications without children are included.
     """
+    limits.start()
     kwin_before, kwin_error = _kwin_windows()
     found: list[_Found] = []
     mappings_by_app: dict[frozenset[int], list[_WindowMapping]] = {}
@@ -299,6 +350,8 @@ def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
             continue
         if not criteria.matches_app(app_name):
             continue
+        if not limits.admit():
+            break
         try:
             app_info = _extract_info(app, 0)
         except Exception:
@@ -306,7 +359,7 @@ def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
         if criteria.matches(app_info):
             entry = _RefEntry(app, app_info.role, app_name, 0, app, None)
             found.append(_Found(app_info, _UNMAPPED, entry))
-        if max_depth < 1:
+        if not limits.allows_depth(1):
             continue
         try:
             pids, mappings, toplevels = _resolve_app(app, kwin_before, kwin_error)
@@ -316,7 +369,7 @@ def _walk(criteria: _Criteria, max_depth: int) -> list[_Found]:
         for toplevel, mapping in zip(toplevels, mappings, strict=True):
             if toplevel is not None:
                 scope = _Scope(app, app_name, toplevel, mapping, scales)
-                _collect(toplevel, scope, 1, max_depth, criteria, found)
+                _collect(toplevel, scope, limits, criteria, found)
 
     _apply_stability(mappings_by_app, kwin_before, kwin_error)
     for item in found:
@@ -336,38 +389,47 @@ class _Scope:
 
 
 def _collect(
-    element: Atspi.Accessible,
+    toplevel: Atspi.Accessible,
     scope: _Scope,
-    depth: int,
-    max_depth: int,
+    limits: _WalkLimits,
     criteria: _Criteria,
     found: list[_Found],
-    scale: float = 1.0,
-    parent_rect: tuple[int, int, int, int] | None = None,
 ) -> None:
-    """Add ``element`` (when it matches) and its matching descendants to ``found``.
+    """Add the matching elements of ``toplevel``'s subtree (depth 1) to ``found``.
 
-    ``scale`` is the device-pixel scale inherited from an enclosing web
-    document and ``parent_rect`` the parent's window-local logical rectangle.
+    Iterative pre-order, so neither a very deep tree nor an application whose
+    tree loops back on itself can exhaust the interpreter stack: the node
+    budget ends a loop. Each pending node carries the device-pixel scale
+    inherited from an enclosing web document and its parent's window-local
+    logical rectangle.
     """
-    if depth > max_depth:
-        return
-    try:
-        info = _extract_info(element, depth)
-    except Exception:
-        return
-    if scale == 1.0 and info.role == _WEB_DOCUMENT_ROLE and info.has_extents:
-        rect = (info.x, info.y, info.width, info.height)
-        scale = _device_pixel_scale(rect, parent_rect, scope.scales)
-    _to_logical(info, scale)
-    if criteria.matches(info):
-        entry = _RefEntry(
-            element, info.role, scope.app, depth, scope.application, scope.toplevel, scale
-        )
-        found.append(_Found(info, scope.mapping, entry))
-    own_rect = (info.x, info.y, info.width, info.height) if info.has_extents else None
-    for child in _children(element, info.children_count):
-        _collect(child, scope, depth + 1, max_depth, criteria, found, scale, own_rect)
+    pending: list[tuple[Atspi.Accessible, int, float, tuple[int, int, int, int] | None]] = [
+        (toplevel, 1, 1.0, None)
+    ]
+    while pending:
+        element, depth, scale, parent_rect = pending.pop()
+        if not limits.allows_depth(depth):
+            continue
+        if not limits.admit():
+            return
+        try:
+            info = _extract_info(element, depth)
+        except Exception:
+            continue
+        if scale == 1.0 and info.role == _WEB_DOCUMENT_ROLE and info.has_extents:
+            rect = (info.x, info.y, info.width, info.height)
+            scale = _device_pixel_scale(rect, parent_rect, scope.scales)
+        _to_logical(info, scale)
+        if criteria.matches(info):
+            entry = _RefEntry(
+                element, info.role, scope.app, depth, scope.application, scope.toplevel, scale
+            )
+            found.append(_Found(info, scope.mapping, entry))
+        if not limits.allows_depth(depth + 1):
+            continue
+        own_rect = (info.x, info.y, info.width, info.height) if info.has_extents else None
+        children = _children(element, info.children_count)
+        pending.extend((child, depth + 1, scale, own_rect) for child in reversed(children))
 
 
 def _children(element: Atspi.Accessible, count: int | None = None) -> list[Atspi.Accessible]:
@@ -395,14 +457,21 @@ def _mint(item: _Found) -> dict[str, Any]:
     return asdict(item.info)
 
 
-def query_elements(locator: Locator, max_depth: int = 15) -> list[dict[str, Any]]:
-    """Every element matching ``locator`` down to ``max_depth``, in pre-order, with refs."""
-    return [_mint(item) for item in _walk(_Criteria.from_locator(locator), max_depth)]
+def query_elements(
+    locator: Locator, limits: _WalkLimits | None = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Every element matching ``locator`` within ``limits``, in pre-order, with refs.
+
+    Returns the elements and the walk report (``visited``, ``truncated``).
+    """
+    limits = limits or _WalkLimits()
+    elements = [_mint(item) for item in _walk(_Criteria.from_locator(locator), limits)]
+    return elements, limits.report()
 
 
 def wait_elements(
     locator: Locator,
-    max_depth: int = 15,
+    limits: _WalkLimits | None = None,
     until: str = "present",
     timeout_ms: int = 5000,
     poll_interval_ms: int = 200,
@@ -410,22 +479,25 @@ def wait_elements(
     """Poll the ``locator`` walk until its matches are present (``>= 1``) or absent (none).
 
     ``timeout_ms <= 0`` polls exactly once; negative values of both
-    ``timeout_ms`` and ``poll_interval_ms`` count as 0. Present matches whose
+    ``timeout_ms`` and ``poll_interval_ms`` count as 0. A truncated walk (see
+    :class:`_WalkLimits`) cannot prove absence, so it never satisfies
+    ``until="absent"``; the last walk's report is returned under ``walk``. Present matches whose
     window mapping failed only because KWin's window list changed during the
     walk are re-polled for up to ``_WINDOWS_CHANGED_SETTLE_S`` (bounded by the
     timeout) and then returned as they are. A timeout is data:
     ``satisfied=False`` with the matches of the last poll.
     """
     criteria = _Criteria.from_locator(locator)
+    limits = limits or _WalkLimits()
     interval = max(poll_interval_ms, 0) / 1000.0
     start = time.monotonic()
     deadline = start + max(timeout_ms, 0) / 1000.0
     settle_deadline: float | None = None
     while True:
-        found = _walk(criteria, max_depth)
+        found = _walk(criteria, limits)
         now = time.monotonic()
         if until == "absent":
-            satisfied = not found
+            satisfied = not found and not limits.truncated
         else:
             satisfied = bool(found)
             if satisfied and any(item.info.unavailable == "windows-changed" for item in found):
@@ -442,6 +514,7 @@ def wait_elements(
                 "elements": [_mint(item) for item in found],
                 "satisfied": satisfied,
                 "elapsed_ms": round((now - start) * 1000),
+                "walk": limits.report(),
             }
         time.sleep(min(interval, deadline - now))
 
@@ -1364,6 +1437,15 @@ def _locator(request: dict[str, Any]) -> Locator:
     return Locator.model_validate(request.get("locator") or {})
 
 
+def _limits(request: dict[str, Any]) -> _WalkLimits:
+    """Walk bounds of a query/wait request; a missing or null max_depth is unlimited."""
+    max_depth = request.get("max_depth")
+    return _WalkLimits(
+        max_depth=None if max_depth is None else int(max_depth),
+        max_nodes=int(request.get("max_nodes", DEFAULT_MAX_NODES)),
+    )
+
+
 def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
     """Dispatch one JSON request to its operation.
 
@@ -1374,13 +1456,13 @@ def _handle_request(request: dict[str, Any]) -> dict[str, Any]:
     op = request.get("op", "")
 
     if op == "query":
-        elements = query_elements(_locator(request), max_depth=int(request.get("max_depth", 15)))
-        return {"ok": True, "result": elements}
+        elements, walk = query_elements(_locator(request), _limits(request))
+        return {"ok": True, "result": elements, "walk": walk}
 
     if op == "wait":
         result = wait_elements(
             _locator(request),
-            max_depth=int(request.get("max_depth", 15)),
+            _limits(request),
             until=str(request.get("until", "present")),
             timeout_ms=int(request.get("timeout_ms", 5000)),
             poll_interval_ms=int(request.get("poll_interval_ms", 200)),

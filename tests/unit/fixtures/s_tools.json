@@ -274,20 +274,29 @@
     {
      "name": "max_depth",
      "required": false,
-     "default": 15,
-     "description": "Depth limit: 0 (or less) = application nodes only, 1 = top-level windows."
+     "default": null,
+     "description": "Depth limit: null = unlimited, 0 (or less) = application nodes only, 1 = top-level windows."
     },
     {
      "name": "wait",
      "required": false,
      "default": null,
      "description": "Omit = read now; set = poll until the condition holds."
+    },
+    {
+     "name": "max_nodes",
+     "required": false,
+     "default": 20000,
+     "description": "Stop the walk after this many nodes (0 = no cap); truncated says so."
     }
    ],
    "output": [
     "locator",
     "elements",
-    "wait"
+    "wait",
+    "visited",
+    "truncated",
+    "max_nodes"
    ]
   },
   {

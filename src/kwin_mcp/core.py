@@ -38,6 +38,7 @@ from kwin_mcp.input import (
 )
 from kwin_mcp.models import (
     ANY_ELEMENT,
+    DEFAULT_MAX_NODES,
     NO_RETENTION,
     AccessibilityState,
     AppLaunchResult,
@@ -365,6 +366,17 @@ def _check_selector(window: WindowSelector) -> None:
     """
     if window.is_empty() or (window.kind is not None and not window.kind):
         select_one([], window)
+
+
+def _walk_fields(walk: object, max_nodes: int) -> dict[str, Any]:
+    """ElementList fields from the worker's walk report (absent from older workers)."""
+    if not isinstance(walk, dict):
+        return {}
+    return {
+        "visited": int(walk.get("visited", 0)),
+        "truncated": walk.get("truncated") or None,
+        "max_nodes": max_nodes,
+    }
 
 
 def _rect_tuple(rect: Rect | None) -> tuple[int, int, int, int] | None:
@@ -1204,15 +1216,25 @@ class AutomationEngine:
     def element_query(
         self,
         locator: Locator = ANY_ELEMENT,
-        max_depth: int = 15,
+        max_depth: int | None = None,
         wait: Wait | None = None,
+        max_nodes: int = DEFAULT_MAX_NODES,
     ) -> ElementList:
-        """Return AT-SPI2 elements matching locator, in pre-order; with wait, poll first."""
+        """Return AT-SPI2 elements matching locator, in pre-order; with wait, poll first.
+
+        ``max_depth`` None walks every depth; the walk stops at ``max_nodes``
+        nodes (``<= 0``: no node cap) or the worker's time budget and then
+        reports itself truncated.
+        """
         self._require_session()
         if wait is None:
-            resp = self._run_atspi("query", locator=locator.model_dump(), max_depth=max_depth)
+            resp = self._run_atspi(
+                "query", locator=locator.model_dump(), max_depth=max_depth, max_nodes=max_nodes
+            )
             elements = [UIElement.from_worker(el) for el in self._atspi_result(resp)]
-            return ElementList(locator=locator, elements=elements)
+            return ElementList(
+                locator=locator, elements=elements, **_walk_fields(resp.get("walk"), max_nodes)
+            )
 
         timeout_ms = wait.timeout_ms
         description = f"Waiting for {locator.describe()}"
@@ -1238,6 +1260,7 @@ class AutomationEngine:
             timeout_s=max(timeout_ms, 0) / 1000 + _ATSPI_TIMEOUT_S,
             locator=locator.model_dump(),
             max_depth=max_depth,
+            max_nodes=max_nodes,
             until=wait.until,
             timeout_ms=timeout_ms,
             poll_interval_ms=max(wait.poll_interval_ms, 0),
@@ -1252,6 +1275,7 @@ class AutomationEngine:
                 satisfied=bool(result["satisfied"]),
                 elapsed_ms=int(result["elapsed_ms"]),
             ),
+            **_walk_fields(result.get("walk"), max_nodes),
         )
 
     def element_act(

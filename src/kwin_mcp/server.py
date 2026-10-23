@@ -82,6 +82,7 @@ from kwin_mcp.core import (
 from kwin_mcp.input import abort_waits
 from kwin_mcp.models import (
     ANY_ELEMENT,
+    DEFAULT_MAX_NODES,
     NO_RETENTION,
     ActionResult,
     AppLaunchResult,
@@ -709,18 +710,25 @@ def element_query(
     engine: AutomationEngine,
     locator: Locator = ANY_ELEMENT,
     max_depth: Annotated[
-        int,
+        int | None,
         Field(
-            description="Depth limit: 0 (or less) = application nodes only, 1 = top-level windows."
+            description="Depth limit: null = unlimited, 0 (or less) = application nodes only, "
+            "1 = top-level windows."
         ),
-    ] = 15,
+    ] = None,
     wait: Annotated[
         Wait | None,
         Field(description="Omit = read now; set = poll until the condition holds."),
     ] = None,
+    max_nodes: Annotated[
+        int,
+        Field(description="Stop the walk after this many nodes (0 = no cap); truncated says so."),
+    ] = DEFAULT_MAX_NODES,
 ) -> ElementList:
     """Return AT-SPI2 elements matching locator (pre-order) with rects, states, actions, window_id and a ref for targets. With wait, poll until present/absent."""  # noqa: E501
-    return engine.element_query(locator=locator, max_depth=max_depth, wait=wait)
+    return engine.element_query(
+        locator=locator, max_depth=max_depth, wait=wait, max_nodes=max_nodes
+    )
 
 
 @_tool(title="Invoke element action", annotations=_D, gate=require_session)

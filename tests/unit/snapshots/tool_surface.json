@@ -936,9 +936,8 @@
      }
     },
     "max_depth": {
-     "default": 15,
-     "description": "Depth limit: 0 (or less) = application nodes only, 1 = top-level windows.",
-     "type": "integer"
+     "type": "integer",
+     "description": "Depth limit: null = unlimited, 0 (or less) = application nodes only, 1 = top-level windows."
     },
     "wait": {
      "additionalProperties": false,
@@ -962,13 +961,18 @@
       }
      },
      "type": "object"
+    },
+    "max_nodes": {
+     "default": 20000,
+     "description": "Stop the walk after this many nodes (0 = no cap); truncated says so.",
+     "type": "integer"
     }
    },
    "type": "object",
    "additionalProperties": false
   },
   "outputSchema": {
-   "description": "Elements matching the locator, in pre-order.",
+   "description": "Elements matching the locator, in pre-order.\n\n``visited`` is the number of nodes the (last) walk read; ``truncated`` says\nwhich bound stopped it early, null when every node in scope was read.",
    "properties": {
     "locator": {
      "additionalProperties": false,
@@ -1204,6 +1208,29 @@
       }
      ],
      "default": null
+    },
+    "visited": {
+     "default": 0,
+     "type": "integer"
+    },
+    "truncated": {
+     "anyOf": [
+      {
+       "enum": [
+        "max_nodes",
+        "time"
+       ],
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "max_nodes": {
+     "default": 0,
+     "type": "integer"
     }
    },
    "required": [
