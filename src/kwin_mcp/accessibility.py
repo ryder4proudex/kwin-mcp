@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from kwin_mcp.geometry import KWinWindow
 
 gi.require_version("Atspi", "2.0")
-from gi.repository import Atspi  # noqa: E402
+from gi.repository import Atspi, GLib  # noqa: E402
 
 _MAX_TEXT_CHARS = DEFAULT_TEXT_MAX_CHARS
 
@@ -1566,13 +1566,47 @@ def _serve(generation: int) -> None:
     # Keep the response stream private: anything a library prints lands on stderr.
     responses = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
-    for line in sys.stdin:
+
+    def answer(line: bytes) -> None:
         try:
             resp = _handle_request(json.loads(line))
         except Exception as exc:
             resp = {"worker_error": f"{type(exc).__name__}: {exc}"}
         responses.write(json.dumps(resp) + "\n")
         responses.flush()
+
+    # libatspi subscribes this process to AT-SPI event signals on the a11y bus and
+    # reads them only when the GLib main context runs. A worker that blocked on
+    # stdin between requests never read them: its queue grew until dbus-broker's
+    # per-UID quota ran out, and the broker then disconnected every peer of that
+    # UID (browsers, Qt apps, the registry), emptying the desktop's tree. So the
+    # worker idles in a GLib main loop that dispatches bus traffic as it arrives
+    # and reads requests from a stdin watch.
+    loop = GLib.MainLoop()
+    fd = sys.stdin.fileno()
+    pending = bytearray()
+
+    def on_stdin(_fd: int, _condition: GLib.IOCondition) -> bool:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            if pending.strip():
+                answer(bytes(pending))
+            loop.quit()
+            return False
+        pending.extend(chunk)
+        while (end := pending.find(b"\n")) >= 0:
+            line = bytes(pending[: end + 1])
+            del pending[: end + 1]
+            answer(line)
+        return True
+
+    GLib.unix_fd_add_full(
+        GLib.PRIORITY_DEFAULT,
+        fd,
+        GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
+        on_stdin,
+    )
+    loop.run()
 
 
 def _main(argv: list[str]) -> None:
