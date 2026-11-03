@@ -8,12 +8,14 @@ import subprocess
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
 from kwin_mcp import server
+from kwin_mcp.models import KeptPaths
 from kwin_mcp.server import IdleClock, IdleClosedError, idle_exit_delay
 
 if TYPE_CHECKING:
@@ -236,3 +238,47 @@ def test_cancelled_request_stays_busy_while_its_body_runs(monkeypatch: pytest.Mo
     while activity.idle_for() is None and time.monotonic() < deadline:
         time.sleep(0.01)
     assert activity.idle_for() is not None
+
+
+class _RecordingEngine:
+    def __init__(self) -> None:
+        self.stops: list[dict[str, Any]] = []
+
+    def _end_session(self, **kwargs: Any) -> None:
+        self.stops.append(kwargs)
+
+
+@pytest.mark.parametrize("detach_live", [False, True])
+def test_exit_cleanup_passes_detach_to_the_stop(
+    monkeypatch: pytest.MonkeyPatch, detach_live: bool
+) -> None:
+    engine = _RecordingEngine()
+    monkeypatch.setattr(server, "_server", SimpleNamespace(engine=engine))
+    monkeypatch.setattr(server, "abort_waits", lambda: None)
+    outcome = server._exit_cleanup(detach_live=detach_live)
+    assert engine.stops == [{"detach_live": detach_live}]
+    assert ("detached" in outcome) == detach_live
+
+
+def test_engine_stop_detaches_a_live_session_only_when_asked(
+    fake_engine: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = fake_engine.engine
+    session = engine._session
+    calls: list[str] = []
+    monkeypatch.setattr(session, "detach", lambda: calls.append("detach") or KeptPaths())
+    monkeypatch.setattr(session, "stop", lambda **_: calls.append("stop") or KeptPaths())
+    monkeypatch.setattr(engine, "_teardown_atspi_worker", lambda: None)
+    result = engine._end_session(detach_live=True)
+    assert calls == ["detach"]
+    assert result.stopped
+    assert result.kind == "live"
+    engine._session = session
+    calls.clear()
+    assert engine.session_stop().stopped
+    assert calls == ["stop"]
+
+
+def test_detach_live_on_exit_flag() -> None:
+    assert server._parse_argv(["--detach-live-on-exit"]).detach_live_on_exit
+    assert not server._parse_argv([]).detach_live_on_exit

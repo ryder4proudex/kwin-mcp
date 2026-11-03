@@ -15,8 +15,9 @@ the lossless ``result.render()`` text. ``KwinServer`` adds three things to the S
 
 Server flags: ``--default-live-session`` (description and instructions sentences only),
 ``--screenshot-images`` (one ImageContent per captured frame),
-``--screenshot-max-edge N``, ``--live-consent=elicit|refuse`` and ``--idle-exit SECONDS``
-(exit after that long without a request).
+``--screenshot-max-edge N``, ``--live-consent=elicit|refuse``, ``--idle-exit SECONDS``
+(exit after that long without a request, detaching a live session) and
+``--detach-live-on-exit`` (every exit without session_stop detaches a live session).
 """
 
 import argparse
@@ -155,6 +156,9 @@ class ServerFlags:
     live_consent: LiveConsent = "elicit"
     # Seconds without a request after which the server exits; 0 = never.
     idle_exit: int = 0
+    # Exits without session_stop (stdin EOF, signals) detach a live session instead
+    # of stopping it; the idle exit always detaches.
+    detach_live_on_exit: bool = False
 
 
 def _max_edge_value(text: str) -> int:
@@ -188,6 +192,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     parser.add_argument("--screenshot-max-edge", type=_max_edge_value, action="append", metavar="N")
     parser.add_argument("--live-consent", choices=("elicit", "refuse"), action="append")
     parser.add_argument("--idle-exit", type=_idle_exit_value, action="append", metavar="SECONDS")
+    parser.add_argument("--detach-live-on-exit", action="store_true")
     args = parser.parse_args(list(argv))
     edges: list[int] = args.screenshot_max_edge or []
     if len(edges) > 1:
@@ -204,6 +209,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
         screenshot_max_edge=edges[0] if edges else 0,
         live_consent=consents[0] if consents else "elicit",
         idle_exit=idle_exits[0] if idle_exits else 0,
+        detach_live_on_exit=args.detach_live_on_exit,
     )
 
 
@@ -212,6 +218,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
 _USAGE = """\
 usage: kwin-mcp [-h] [--default-live-session] [--screenshot-images] [--screenshot-max-edge N]
                 [--live-consent {elicit,refuse}] [--idle-exit SECONDS]
+                [--detach-live-on-exit]
 
 kwin-mcp: MCP server for GUI automation on KDE Plasma 6 Wayland.
 
@@ -236,10 +243,15 @@ options:
                           elicit (the default) shows a confirmation form when the
                           client supports one, refuse never asks and refuses the
                           close; may be given once
-  --idle-exit SECONDS     exit (stopping the session like any other exit) after
-                          SECONDS without a tool call or resource read and with none
-                          in flight (0 = never, the default); for clients that keep
-                          the server alive but may never close it; may be given once
+  --idle-exit SECONDS     exit after SECONDS without a tool call or resource read
+                          and with none in flight (0 = never, the default); a live
+                          session is detached: apps launched through it keep
+                          running and the a11y switch stays as it is; a virtual
+                          session is stopped; for clients that keep the server
+                          alive but may never close it; may be given once
+  --detach-live-on-exit   on stdin EOF or SIGTERM/SIGHUP/SIGINT, detach a live
+                          session like --idle-exit instead of stopping it
+                          (session_stop still stops it)
 
 Documentation: https://github.com/isac322/kwin-mcp#readme
 """
@@ -1938,22 +1950,30 @@ def _signal_watcher() -> NoReturn:
 
 
 def _idle_watcher(limit: int) -> NoReturn:
-    """Exit via the shared finish routine once no request came for ``limit`` seconds."""
+    """Exit via the shared finish routine once no request came for ``limit`` seconds.
+
+    The exit detaches a live session (see ``LiveSession.detach``): nobody asked to
+    stop it, and the user may still be working with the apps launched through it.
+    """
     while True:
         delay = idle_exit_delay(_activity, limit)
         if delay > 0:
             time.sleep(delay)
         elif _activity.close_if_idle(limit):
             break
-    _finish(0, f"kwin-mcp: no request for {limit} s (--idle-exit); exiting\n")
+    _finish(0, f"kwin-mcp: no request for {limit} s (--idle-exit); exiting\n", detach_live=True)
 
 
-def _exit_cleanup() -> str:
-    """Stop the session (or terminate the owned groups) at server exit; return the outcome."""
+def _exit_cleanup(*, detach_live: bool = False) -> str:
+    """Stop the session (or terminate the owned groups) at server exit; return the outcome.
+
+    ``detach_live`` detaches a live session instead of stopping it: its launched
+    apps keep running and the accessibility switch stays as it is.
+    """
     server = _server
     if server is None:
         process_registry.close()
-        process_registry.terminate_all()
+        process_registry.terminate_all(detach=detach_live)
         return "owned-process registry path (no server was built)"
     engine = server.engine
     # The engine is not thread-safe and is owned by the single tool thread, so the
@@ -1973,7 +1993,7 @@ def _exit_cleanup() -> str:
         # the tool thread" from "the stop is still queued behind an in-flight
         # tool".
         stop_started.set()
-        engine.session_stop()
+        engine._end_session(detach_live=detach_live)
 
     stop = _tool_executor.submit(_stop_for_exit)
     # Give the stop a short chance to start. If the tool thread is free the stop
@@ -1985,7 +2005,7 @@ def _exit_cleanup() -> str:
         # The stop is still pending behind the in-flight tool, so it never runs.
         # Clean up the owned groups and dirs directly, without touching the engine.
         process_registry.close()
-        process_registry.terminate_all()
+        process_registry.terminate_all(detach=detach_live)
         return "owned-process registry path (stop cancelled before it ran; owned groups terminated)"
     # The stop started (or started in the race just after the drain). Wait for it to
     # finish on the tool thread; session_stop's own waits are bounded.
@@ -1993,6 +2013,8 @@ def _exit_cleanup() -> str:
         stop.result()
     except Exception as exc:  # a failed stop must still exit, with the outcome logged
         return f"serialized session_stop path raised: {type(exc).__name__}: {exc}"
+    if detach_live:
+        return "serialized session_stop path (live session detached; completed on the tool thread)"
     return "serialized session_stop path (completed on the tool thread)"
 
 
@@ -2017,14 +2039,14 @@ def _report_exit(report: str) -> None:
         writer.join(EXIT_REPORT_SECONDS)
 
 
-def _finish(exit_code: int, failure: str = "") -> NoReturn:
+def _finish(exit_code: int, failure: str = "", *, detach_live: bool | None = None) -> NoReturn:
     """Run the once-only exit cleanup and leave the process with ``exit_code``.
 
     Whichever path arrives first — the watcher thread after a signal or the main
     thread when the server's ``run()`` ends — owns the cleanup; a second caller blocks
     in ``_finish_lock.acquire()`` until the process exits, so the stop can never run
     twice. ``failure`` is a traceback (or the idle-exit reason) reported ahead of the
-    cleanup outcome.
+    cleanup outcome. ``detach_live`` defaults to ``--detach-live-on-exit``.
     """
     _finish_lock.acquire()
     # First statement under the lock: work queued on the tool thread from now on
@@ -2032,8 +2054,10 @@ def _finish(exit_code: int, failure: str = "") -> NoReturn:
     _shutdown.set()
     # Every failure of the cleanup is reported, never raised: the forced exit
     # below is what keeps interpreter shutdown from joining a busy tool thread.
+    if detach_live is None:
+        detach_live = _server is not None and _server.flags.detach_live_on_exit
     try:
-        outcome = _exit_cleanup()
+        outcome = _exit_cleanup(detach_live=detach_live)
     except Exception as exc:
         outcome = f"cleanup raised: {type(exc).__name__}: {exc}"
     # On a signal the stdio read worker is still blocked on readline of the stdin

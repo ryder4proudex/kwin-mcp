@@ -84,6 +84,7 @@ def test_usage_lists_every_flag() -> None:
         "--screenshot-max-edge N",
         "--live-consent {elicit,refuse}",
         "--idle-exit SECONDS",
+        "--detach-live-on-exit",
     ):
         assert flag in usage, flag
     assert usage.rstrip().endswith("Documentation: https://github.com/isac322/kwin-mcp#readme")
@@ -95,4 +96,5 @@ def test_usage_lists_every_flag() -> None:
         "--screenshot-max-edge",
         "--live-consent",
         "--idle-exit",
+        "--detach-live-on-exit",
     ]
