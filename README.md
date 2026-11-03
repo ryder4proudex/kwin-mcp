@@ -222,6 +222,9 @@ kwin-mcp --screenshot-images --screenshot-max-edge 2576
 
 # Never ask before closing a window on the live desktop; refuse instead
 kwin-mcp --live-consent refuse
+
+# Watch another session read-only, with optional takeover (see Observers and Handoff)
+kwin-mcp-viewer --session-file owner.json --control-socket owner.sock
 ```
 
 `kwin-mcp-cli` exposes the same 29 tools as commands with the same names and parameters, and prints the same text the MCP server returns. Arguments are `key=value` pairs; object, list and union parameters take JSON:
@@ -470,7 +473,25 @@ Known limits: `SIGKILL` runs no cleanup, so with `retention.artifacts=false` the
 
 `session_connect(observe=true)` attaches a read-only observer to a session that another process owns, for example a virtual session started by an agent. The observer opens no input backend (EIS) and no clipboard, and refuses `app_launch`, `element_act`, the window mutators and `dbus_call` with an `Observer session` error; it can list windows, query elements and capture the screen. `session_stop` on an observer only detaches: the owner's compositor and apps keep running, because an observer never launched anything. `enable_accessibility=true` is refused with `observe=true`, so an observer never changes the session.
 
-Observers separate GUI input only; they are not a process sandbox (see [Isolation scope](#isolation-scope)).
+`kwin-mcp-viewer` is a small GTK 4 window built on that observer. It polls `screen_capture` and shows the screen; it listens on no network port.
+
+```bash
+# Watch only (read-only)
+kwin-mcp-viewer --dbus-address unix:path=/run/user/1000/... --wayland-display /run/user/1000/wayland-...
+# Watch a session whose owner writes a state file and offers a control socket
+kwin-mcp-viewer --session-file owner.json --control-socket owner.sock
+```
+
+The session file is JSON with `dbus_address` and `wayland_socket` (or `wayland_display`). Taking control is the owner's decision: with `--control-socket` the viewer speaks a one-line-JSON handoff protocol over that local Unix socket, and the owner runs any input itself.
+
+| Request | Owner's duty |
+|---|---|
+| `{"op":"takeover","holder":H,"ttl_s":T}` | pause AI input, release keys and buttons the AI still holds, grant `H` a lease of `T` seconds |
+| `{"op":"heartbeat","holder":H,"ttl_s":T}` | renew the lease (`not_holder` error when `H` lost it) |
+| `{"op":"release","holder":H}` | return control to the AI at once |
+| `{"op":"human_input","holder":H,"tool":NAME,"args":{...}}` | run one pointer or keyboard tool only while `H` holds the lease |
+
+Replies are `{"ok":true,...}` or `{"ok":false,"code":C,"error":E}`. One holder controls input at a time. The viewer sends heartbeats every third of its lease (`--lease`, default 60 s) and releases on close; if it dies, the lease expires and the AI resumes. While the viewer holds control, clicks and scrolls on the picture are mapped to session coordinates through the frame's image mapping and sent as `pointer_click` and `pointer_scroll`, and keys as `keyboard_press` (named keys and chords) or `keyboard_type` (characters). Closing the viewer never stops the observed session. Like every session layer here, this isolates GUI input and focus only; it is not a process sandbox (see [Isolation scope](#isolation-scope)).
 
 ### Input Injection
 
