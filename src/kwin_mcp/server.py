@@ -75,6 +75,7 @@ from kwin_mcp.core import (
     NO_CLIPBOARD_TEXT,
     NO_INPUT_TEXT,
     NO_SESSION_TEXT,
+    OBSERVER_TEXT,
     SESSION_RUNNING_TEXT,
     AutomationEngine,
     CloseTarget,
@@ -369,11 +370,22 @@ async def require_session(ctx: Context) -> None:
         raise ToolError(NO_SESSION_TEXT)
 
 
+async def require_control(ctx: Context) -> None:
+    """Gate of tools that change the session: a session this process may act on (no observer)."""
+    engine = _kwin_server(ctx).engine
+    if engine._session is None:
+        raise ToolError(NO_SESSION_TEXT)
+    if engine._observe:
+        raise ToolError(OBSERVER_TEXT)
+
+
 async def require_input(ctx: Context) -> None:
     """Gate of the pointer, keyboard and touch tools: a session with an input backend."""
     engine = _kwin_server(ctx).engine
     if engine._session is None:
         raise ToolError(NO_SESSION_TEXT)
+    if engine._observe:
+        raise ToolError(OBSERVER_TEXT)
     if engine._input is None:
         raise ToolError(NO_INPUT_TEXT)
 
@@ -383,6 +395,8 @@ async def require_clipboard(ctx: Context) -> None:
     engine = _kwin_server(ctx).engine
     if engine._session is None:
         raise ToolError(NO_SESSION_TEXT)
+    if engine._observe:
+        raise ToolError(OBSERVER_TEXT)
     if not engine._clipboard_enabled:
         raise ToolError(NO_CLIPBOARD_TEXT)
 
@@ -615,6 +629,13 @@ def session_connect(
         ),
     ] = False,
     retention: Annotated[Retention, Field(description=_RETENTION_DESCRIPTION)] = NO_RETENTION,
+    observe: Annotated[
+        bool,
+        Field(
+            description="Read-only observer of a session another process owns: no input, "
+            "clipboard, app launch, window or D-Bus actions; session_stop only detaches."
+        ),
+    ] = False,
 ) -> SessionInfo:
     """Attach to an already running KWin session (the real desktop or a container). Actions then affect real applications; window_close asks the user first."""  # noqa: E501
     return engine.session_connect(
@@ -622,6 +643,7 @@ def session_connect(
         wayland_display=wayland_display,
         enable_accessibility=enable_accessibility,
         retention=retention,
+        observe=observe,
     )
 
 
@@ -640,7 +662,7 @@ def session_info(engine: AutomationEngine) -> SessionInfoResult:
 # ── Tools: apps ──────────────────────────────────────────────────────────
 
 
-@_tool(title="Launch app in session", annotations=_D_OPEN, gate=require_session)
+@_tool(title="Launch app in session", annotations=_D_OPEN, gate=require_control)
 def app_launch(
     engine: AutomationEngine,
     command: Annotated[
@@ -749,7 +771,7 @@ def element_query(
     )
 
 
-@_tool(title="Invoke element action", annotations=_D, gate=require_session)
+@_tool(title="Invoke element action", annotations=_D, gate=require_control)
 def element_act(
     engine: AutomationEngine,
     element: Annotated[
@@ -797,7 +819,7 @@ def desktop_list(engine: AutomationEngine) -> DesktopList:
     return engine.desktop_list()
 
 
-@_tool(title="Activate window", annotations=_NDI, gate=require_session)
+@_tool(title="Activate window", annotations=_NDI, gate=require_control)
 def window_focus(
     engine: AutomationEngine,
     window: Annotated[WindowSelector, Field(description=_ONE_WINDOW_DESCRIPTION)],
@@ -807,7 +829,7 @@ def window_focus(
     return engine.window_focus(window=window, capture=capture)
 
 
-@_tool(title="Move window", annotations=_D, gate=require_session)
+@_tool(title="Move window", annotations=_D, gate=require_control)
 def window_place(
     engine: AutomationEngine,
     window: Annotated[WindowSelector, Field(description=_ONE_WINDOW_DESCRIPTION)],
@@ -827,7 +849,7 @@ def window_place(
     return engine.window_place(window=window, frame=frame, desktop=desktop, capture=capture)
 
 
-@_tool(title="Close window", annotations=_D, gate=require_session)
+@_tool(title="Close window", annotations=_D, gate=require_control)
 def window_close(
     engine: AutomationEngine,
     window: Annotated[WindowSelector, Field(description=_ONE_WINDOW_DESCRIPTION)],
@@ -1080,7 +1102,7 @@ def clipboard_write(
     return engine.clipboard_write(text=text)
 
 
-@_tool(title="Call D-Bus method", annotations=_D_OPEN, gate=require_session)
+@_tool(title="Call D-Bus method", annotations=_D_OPEN, gate=require_control)
 def dbus_call(
     engine: AutomationEngine,
     service: Annotated[str, Field(description="Bus name, e.g. org.kde.KWin.")],

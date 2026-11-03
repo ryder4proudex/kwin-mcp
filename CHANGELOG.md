@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `session_connect(observe=true)` attaches a read-only observer to a session another process owns: no input backend and no clipboard; `app_launch`, `element_act`, the window mutators and `dbus_call` are refused with an `Observer session` error, while window lists, element queries and screen captures work. `session_stop` only detaches, so an observer never stops the owner's compositor or apps. `session_info` reports `observer`. See [Observers and Handoff](README.md#observers-and-handoff).
 - `element_query` can be scoped to one window and write large trees to a file. `window` takes a `WindowSelector` (as in `window_list`) and limits the walk to the AT-SPI top-levels mapped to the matching KWin windows, so one Chrome window is read without the other windows of the browser. `text_max_chars` sets the per-element text cap (default 200, `0` = whole text). `output_file` writes the elements as JSONL (one object per element, mode `0600`, symlinks refused) to an absolute `.jsonl` path and returns only a summary (`output_file`, `output_count`, `output_bytes`). The README documents `locator={"states": ["showing"]}` for on-screen elements only.
 
 ### Changed

@@ -147,6 +147,11 @@
      ],
      "type": "string"
     },
+    "observer": {
+     "default": false,
+     "description": "Read-only observer of a session another process owns (session_connect observe=true): no input, clipboard or actions; session_stop only detaches.",
+     "type": "boolean"
+    },
     "warnings": {
      "items": {
       "type": "string"
@@ -212,6 +217,11 @@
       "artifacts": false,
       "home": false
      }
+    },
+    "observe": {
+     "default": false,
+     "description": "Read-only observer of a session another process owns: no input, clipboard, app launch, window or D-Bus actions; session_stop only detaches.",
+     "type": "boolean"
     }
    },
    "type": "object",
@@ -309,6 +319,11 @@
       "unavailable"
      ],
      "type": "string"
+    },
+    "observer": {
+     "default": false,
+     "description": "Read-only observer of a session another process owns (session_connect observe=true): no input, clipboard or actions; session_stop only detaches.",
+     "type": "boolean"
     },
     "warnings": {
      "items": {
@@ -537,6 +552,11 @@
           "unavailable"
          ],
          "type": "string"
+        },
+        "observer": {
+         "default": false,
+         "description": "Read-only observer of a session another process owns (session_connect observe=true): no input, clipboard or actions; session_stop only detaches.",
+         "type": "boolean"
         },
         "warnings": {
          "items": {
