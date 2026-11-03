@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `just install` (run by the post-commit hook on `main`) no longer restarts the mcporter daemon immediately, which ended every live desktop session. It queues the restart in a transient systemd user unit, `kwin-mcp-deferred-restart`, that waits for `mcp-restart-when-idle` (from workstation-mcp) to report the desktop MCP stack idle and starts the new daemon in its own scope. Without that helper it only prints how to restart by hand.
 - `element_query` no longer stops at depth 15: `max_depth` defaults to `null` (every depth), and the walk is bounded by the new `max_nodes` parameter (default 20000, `0` = no cap) and a 20 s time budget instead. A walk that hits a bound returns what it found with `truncated` (`"max_nodes"` or `"time"`), the `visited` node count and a `TRUNCATED:` line; a truncated walk never satisfies `wait={until:"absent"}`. Controls of web apps in Chrome sit around depth 20 and were invisible to queries and waits before.
 
 ### Fixed
