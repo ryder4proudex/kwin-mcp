@@ -211,7 +211,11 @@ class ControlClient:
 
 
 class Handoff:
-    """One human's lease on the owner's input: take, renew, use and give back."""
+    """One human's lease on the owner's input: take, renew, use and give back.
+
+    ``generation`` changes whenever control is taken, given back or lost, so input
+    queued under one takeover is never sent under a later one.
+    """
 
     def __init__(
         self, client: ControlClient, holder: str, lease_s: float = DEFAULT_LEASE_S
@@ -220,41 +224,92 @@ class Handoff:
         self.holder = holder
         self.lease_s = lease_s
         self.holding = False
+        self.generation = 0
+        self._mu = threading.Lock()
+
+    def _lose(self) -> None:
+        with self._mu:
+            if self.holding:
+                self.holding = False
+                self.generation += 1
 
     def take(self) -> dict[str, Any]:
         """Take control: the owner pauses the AI and releases its held input."""
         reply = self.client.request("takeover", holder=self.holder, ttl_s=self.lease_s)
-        self.holding = True
+        with self._mu:
+            self.holding = True
+            self.generation += 1
         return reply
 
     def heartbeat(self) -> None:
-        """Renew the lease; a refused renewal means control is lost."""
+        """Renew the lease; any failure means control is lost (take over again)."""
         if not self.holding:
             return
         try:
             self.client.request("heartbeat", holder=self.holder, ttl_s=self.lease_s)
         except ViewerError:
-            self.holding = False
+            self._lose()
             raise
 
     def give_back(self) -> None:
         """Return control at once (idempotent)."""
         if not self.holding:
             return
-        self.holding = False
+        self._lose()
         self.client.request("release", holder=self.holder)
 
-    def send(self, tool: str, args: dict[str, Any]) -> dict[str, Any]:
-        """Ask the owner to run one input tool for this holder."""
-        if not self.holding:
+    def send(
+        self, tool: str, args: dict[str, Any], generation: int | None = None
+    ) -> dict[str, Any]:
+        """Ask the owner to run one input tool for this holder (in ``generation``, if given)."""
+        if not self.holding or (generation is not None and generation != self.generation):
             msg = "take control first: input goes to the session only while you hold the lease"
             raise ViewerError(msg, "not_holder")
         try:
             return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
         except ViewerError as exc:
             if exc.code in LOST_CONTROL_CODES:
-                self.holding = False
+                self._lose()
             raise
+
+
+class InputQueue:
+    """Sends the human's input to the owner one call at a time, in the order it happened.
+
+    Each event is stamped with the takeover generation it was made in; events left
+    over from an earlier takeover (given back, lost, or taken again) are dropped.
+    """
+
+    def __init__(self, handoff: Handoff, on_error: Callable[[str], None]) -> None:
+        self.handoff = handoff
+        self._on_error = on_error
+        self._q: queue.Queue[tuple[int, str, dict[str, Any]] | None] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="kwin-mcp-viewer-input", daemon=True)
+        self._thread.start()
+
+    def submit(self, tool: str, args: dict[str, Any]) -> bool:
+        """Queue one input call; False when control is not held (nothing queued)."""
+        if not self.handoff.holding:
+            return False
+        self._q.put((self.handoff.generation, tool, args))
+        return True
+
+    def _run(self) -> None:
+        while True:
+            item = self._q.get()
+            if item is None:
+                return
+            generation, tool, args = item
+            if not self.handoff.holding or generation != self.handoff.generation:
+                continue
+            try:
+                self.handoff.send(tool, args, generation)
+            except ViewerError as exc:
+                self._on_error(f"{tool}: {exc}")
+
+    def close(self, timeout: float = 5.0) -> None:
+        self._q.put(None)
+        self._thread.join(timeout)
 
 
 def widget_to_image(

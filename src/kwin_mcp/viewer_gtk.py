@@ -20,6 +20,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from kwin_mcp.viewer import (  # noqa: E402
     Handoff,
+    InputQueue,
     ObserverWorker,
     ViewerError,
     image_to_screen,
@@ -48,7 +49,8 @@ class ViewerWindow:
         self.frame: Frame | None = None
         self._capturing = False
         self._pointer: tuple[float, float] | None = None
-        self._input_busy = threading.Lock()
+        # One FIFO sender: input keeps its order and never outlives the takeover it was made in.
+        self._inputs = InputQueue(handoff, self._input_failed) if handoff is not None else None
 
         self.window = Gtk.ApplicationWindow(application=app, title="kwin-mcp viewer")
         self.window.set_default_size(1280, 780)
@@ -163,21 +165,11 @@ class ViewerWindow:
         return True
 
     def _send(self, tool: str, args: dict[str, Any]) -> None:
-        if self.handoff is None or not self.handoff.holding:
-            return
-        handoff = self.handoff
+        if self._inputs is not None:
+            self._inputs.submit(tool, args)
 
-        def work() -> None:
-            note = ""
-            with self._input_busy:
-                try:
-                    handoff.send(tool, args)
-                except ViewerError as exc:
-                    note = f"({tool}: {exc})"
-            if note:
-                GLib.idle_add(lambda: (self._set_status(note), False)[-1])
-
-        threading.Thread(target=work, daemon=True).start()
+    def _input_failed(self, note: str) -> None:
+        GLib.idle_add(lambda: (self._set_status(f"({note})"), False)[-1])
 
     def _screen_point(self, wx: float, wy: float) -> tuple[int, int] | None:
         frame = self.frame
@@ -246,6 +238,8 @@ class ViewerWindow:
         if self.handoff is not None and self.handoff.holding:
             with contextlib.suppress(ViewerError):
                 self.handoff.give_back()
+        if self._inputs is not None:
+            self._inputs.close()
         return False
 
 

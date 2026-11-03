@@ -15,6 +15,7 @@ from kwin_mcp.models import ImageMapping, Point
 from kwin_mcp.viewer import (
     ControlClient,
     Handoff,
+    InputQueue,
     ObserverWorker,
     SessionTarget,
     ViewerError,
@@ -197,6 +198,73 @@ def test_connection_loss_drops_control(tmp_path: Path) -> None:
         assert not handoff.holding
     finally:
         srv.close()
+
+
+class GatedClient:
+    """In-memory owner: records requests; human_input waits for `gate` when it is set."""
+
+    def __init__(self) -> None:
+        self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.gate: threading.Event | None = None
+        self.entered = threading.Event()
+
+    def request(self, op: str, **fields: Any) -> dict[str, Any]:
+        self.requests.append((op, fields))
+        if op == "human_input" and self.gate is not None:
+            self.entered.set()
+            self.gate.wait(5)
+        return {"ok": True}
+
+
+def _wait(cond: Any) -> None:
+    for _ in range(500):
+        if cond():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+def test_input_queue_keeps_order() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    errors: list[str] = []
+    inputs = InputQueue(handoff, errors.append)
+    try:
+        for i in range(50):
+            assert inputs.submit("keyboard_type", {"text": str(i)})
+        _wait(lambda: len(client.requests) == 51)
+    finally:
+        inputs.close()
+    sent = [f["args"]["text"] for op, f in client.requests if op == "human_input"]
+    assert sent == [str(i) for i in range(50)] and errors == []
+
+
+def test_queued_input_never_crosses_into_a_new_takeover() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    inputs = InputQueue(handoff, lambda _note: None)
+    try:
+        client.gate = threading.Event()
+        inputs.submit("keyboard_type", {"text": "a"})
+        client.entered.wait(5)  # "a" is in flight
+        inputs.submit("keyboard_press", {"keys": "Return"})  # queued behind it
+        handoff.give_back()
+        handoff.take()  # a quick new takeover
+        client.gate.set()
+        _wait(lambda: inputs._q.empty())
+        time.sleep(0.05)
+    finally:
+        inputs.close()
+    ops = [(op, f.get("tool")) for op, f in client.requests]
+    assert ops == [
+        ("takeover", None),
+        ("human_input", "keyboard_type"),
+        ("release", None),
+        ("takeover", None),
+    ]  # the stale Return was dropped
+    assert not inputs.submit("x", {}) or handoff.holding
 
 
 # -- coordinates ----------------------------------------------------------------
