@@ -23,6 +23,7 @@ from kwin_mcp.viewer import (  # noqa: E402
     InputQueue,
     ObserverWorker,
     ViewerError,
+    click_to_input,
     image_to_screen,
     key_to_input,
     widget_to_image,
@@ -182,15 +183,13 @@ class ViewerWindow:
             return None
         return image_to_screen(image[0], image[1], frame.mapping)
 
-    def _on_click(self, gesture: Gtk.GestureClick, n_press: int, x: float, y: float) -> None:
+    def _on_click(self, gesture: Gtk.GestureClick, _n_press: int, x: float, y: float) -> None:
         self.picture.grab_focus()
-        if n_press != 1:
-            return
+        # Every press is one click, n_press included: a double click is two presses.
         point = self._screen_point(x, y)
         if point is None:
             return
-        button = {1: "left", 2: "middle", 3: "right"}.get(gesture.get_current_button(), "left")
-        self._send("pointer_click", {"target": {"x": point[0], "y": point[1]}, "button": button})
+        self._send(*click_to_input(point, gesture.get_current_button()))
 
     def _on_motion(self, _ctl: Gtk.EventControllerMotion, x: float, y: float) -> None:
         self._pointer = (x, y)

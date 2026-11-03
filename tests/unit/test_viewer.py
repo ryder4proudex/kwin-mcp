@@ -20,6 +20,7 @@ from kwin_mcp.viewer import (
     SessionTarget,
     ViewerError,
     _parse_args,
+    click_to_input,
     image_to_screen,
     key_to_input,
     read_session_file,
@@ -265,6 +266,13 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         ("takeover", None),
     ]  # the stale Return was dropped
     assert not inputs.submit("x", {}) or handoff.holding
+
+
+def test_double_click_is_two_single_clicks() -> None:
+    first = click_to_input((10, 20), 1)
+    second = click_to_input((10, 20), 1)
+    assert first == second == ("pointer_click", {"target": {"x": 10, "y": 20}, "button": "left"})
+    assert click_to_input((1, 2), 3)[1]["button"] == "right"
 
 
 # -- coordinates ----------------------------------------------------------------

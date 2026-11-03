@@ -312,6 +312,16 @@ class InputQueue:
         self._thread.join(timeout)
 
 
+def click_to_input(point: tuple[int, int], gdk_button: int) -> tuple[str, dict[str, Any]]:
+    """One press in the viewer becomes exactly one click in the session.
+
+    A double click arrives as two presses (n_press 1, then 2) and is forwarded as two
+    single clicks, which the session's toolkit counts as a double click again.
+    """
+    button = {1: "left", 2: "middle", 3: "right"}.get(gdk_button, "left")
+    return "pointer_click", {"target": {"x": point[0], "y": point[1]}, "button": button}
+
+
 def widget_to_image(
     wx: float, wy: float, widget_w: float, widget_h: float, image_w: int, image_h: int
 ) -> tuple[float, float] | None:
