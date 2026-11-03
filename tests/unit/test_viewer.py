@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -80,6 +82,8 @@ class FakeOwner:
                     if not chunk:
                         break
                     buf += chunk
+                if not buf:  # a client that refused us hung up without a request
+                    continue
                 req = json.loads(buf)
                 self.requests.append(req)
                 conn.sendall(json.dumps(self._reply(req)).encode() + b"\n")
@@ -140,6 +144,59 @@ def test_owner_not_listening(tmp_path: Path) -> None:
     with pytest.raises(ViewerError) as exc:
         client.request("status")
     assert exc.value.code == "not_running"
+
+
+def test_control_socket_of_another_user_is_refused(owner: FakeOwner) -> None:
+    impostor = ControlClient(owner.path, peer_uid_of=lambda _sock: os.getuid() + 1)
+    with pytest.raises(ViewerError) as exc:
+        impostor.request("takeover", holder="human:test", ttl_s=30)
+    assert exc.value.code == "forbidden"
+    wrong_owner = ControlClient(owner.path, expected_uid=os.getuid() + 1)
+    with pytest.raises(ViewerError) as exc:
+        wrong_owner.request("status")
+    assert exc.value.code == "forbidden"
+    assert owner.requests == []  # nothing, typed text least of all, reached the server
+    handoff = Handoff(impostor, "human:test")
+    with pytest.raises(ViewerError):
+        handoff.take()
+    assert not handoff.holding
+
+
+def _resetting_owner(path: str) -> socket.socket:
+    """A server that closes each connection with the request unread: the client sees a reset."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(8)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            time.sleep(0.05)  # the request has arrived; closing with it unread resets the peer
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_connection_loss_drops_control(tmp_path: Path) -> None:
+    path = str(tmp_path / "reset.sock")
+    srv = _resetting_owner(path)
+    try:
+        handoff = Handoff(ControlClient(path), "human:test")
+        handoff.holding = True
+        with pytest.raises(ViewerError) as exc:
+            handoff.send("keyboard_type", {"text": "a"})
+        assert exc.value.code == "disconnected"
+        assert not handoff.holding  # the UI no longer claims the AI is paused
+        handoff.holding = True
+        with pytest.raises(ViewerError):
+            handoff.heartbeat()
+        assert not handoff.holding
+    finally:
+        srv.close()
 
 
 # -- coordinates ----------------------------------------------------------------

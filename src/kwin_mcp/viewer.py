@@ -17,6 +17,8 @@ a local Unix socket, one JSON line back):
 - ``{"op": "status"}``: optional, shown in the status line.
 
 Replies are ``{"ok": true, ...}`` or ``{"ok": false, "code": C, "error": E}``.
+The viewer talks only to a control socket served by its own user (``SO_PEERCRED``),
+so a socket planted by someone else never receives what the human types.
 The viewer never sends input itself. If it dies, it stops sending heartbeats,
 the lease expires and the owner resumes. Nothing listens on the network.
 """
@@ -121,12 +123,46 @@ def read_session_file(path: str | os.PathLike[str]) -> SessionTarget:
     return SessionTarget(dbus, wayland)
 
 
+# Codes after which the viewer no longer holds control: it must take over again.
+LOST_CONTROL_CODES = frozenset(
+    {"not_holder", "not_running", "crashed", "disconnected", "forbidden"}
+)
+
+
+def peer_uid(sock: socket.socket) -> int:
+    """UID of the process serving the other end of a connected Unix socket."""
+    creds = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    return int.from_bytes(creds[4:8], sys.byteorder)
+
+
 class ControlClient:
     """The viewer side of the handoff protocol (see the module docstring)."""
 
-    def __init__(self, path: str, timeout: float = REQUEST_TIMEOUT_S) -> None:
+    def __init__(
+        self,
+        path: str,
+        timeout: float = REQUEST_TIMEOUT_S,
+        expected_uid: int | None = None,
+        peer_uid_of: Callable[[socket.socket], int] = peer_uid,
+    ) -> None:
         self.path = path
         self.timeout = timeout
+        self.expected_uid = os.getuid() if expected_uid is None else expected_uid
+        self._peer_uid_of = peer_uid_of
+
+    def _check_owner(self, sock: socket.socket) -> None:
+        """Refuse a socket file or a server that does not belong to the expected user."""
+        try:
+            file_uid = os.stat(self.path).st_uid
+        except OSError:
+            file_uid = None
+        server_uid = self._peer_uid_of(sock)
+        if file_uid != self.expected_uid or server_uid != self.expected_uid:
+            msg = (
+                f"refused: {self.path} is served by uid {server_uid} (file owner {file_uid}), "
+                f"not by uid {self.expected_uid}; nothing was sent"
+            )
+            raise ViewerError(msg, "forbidden")
 
     def request(self, op: str, **fields: Any) -> dict[str, Any]:
         """Send one request and return the reply; raise ViewerError on ok=false."""
@@ -140,6 +176,7 @@ class ControlClient:
             except (FileNotFoundError, ConnectionRefusedError):
                 msg = f"the session owner is not listening on {self.path}"
                 raise ViewerError(msg, "not_running") from None
+            self._check_owner(sock)
             sock.settimeout(self.timeout)
             sock.sendall(json.dumps(payload, ensure_ascii=False).encode() + b"\n")
             while not buf.endswith(b"\n"):
@@ -153,6 +190,9 @@ class ControlClient:
         except TimeoutError:
             msg = f"the session owner did not answer {op} in {self.timeout:.0f} s"
             raise ViewerError(msg, "timeout") from None
+        except OSError as exc:  # reset, broken pipe, ...: the owner went away mid-request
+            msg = f"lost the connection to the session owner during {op}: {exc}"
+            raise ViewerError(msg, "disconnected") from None
         finally:
             sock.close()
         try:
@@ -212,7 +252,7 @@ class Handoff:
         try:
             return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
         except ViewerError as exc:
-            if exc.code in ("not_holder", "not_running", "crashed"):
+            if exc.code in LOST_CONTROL_CODES:
                 self.holding = False
             raise
 
