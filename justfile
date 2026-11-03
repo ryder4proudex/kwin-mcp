@@ -15,7 +15,9 @@ install:
     # desktop session. Queue the restart in a transient user unit that waits until
     # mcp-restart-when-idle (workstation-mcp) sees the desktop MCP stack idle, so
     # this never blocks the commit or cuts off an agent. The new daemon gets its
-    # own scope, so it outlives the queue unit.
+    # own scope, so it outlives the queue unit. --retry: a call that starts in the
+    # helper's last sub-second window makes the restart fail and leaves mcporter
+    # draining; the helper reruns it once no call is in flight.
     helper=$(command -v mcp-restart-when-idle || true)
     unit=kwin-mcp-deferred-restart
     if [ -z "$helper" ] || ! command -v systemd-run >/dev/null 2>&1; then
@@ -26,8 +28,8 @@ install:
     else
         systemd-run --user --quiet --collect --unit="$unit" \
             --description="Restart mcporter once the desktop MCP stack is idle" \
-            "$helper" --idle 300 --timeout 7200 -- \
-            systemd-run --user --scope --quiet --collect --unit="mcporter-daemon-$(date +%s)" \
+            "$helper" --idle 300 --timeout 7200 --retry 5 -- \
+            systemd-run --user --scope --quiet --collect --description="mcporter daemon" \
             mcporter daemon restart
         echo "kwin-mcp installed; mcporter restart queued until idle: journalctl --user -u $unit"
     fi
