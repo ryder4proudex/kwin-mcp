@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
@@ -208,12 +209,15 @@ class GatedClient:
         self.requests: list[tuple[str, dict[str, Any]]] = []
         self.gate: threading.Event | None = None
         self.entered = threading.Event()
+        self.fail_input: str | None = None  # error code for gated human_input calls
 
     def request(self, op: str, **fields: Any) -> dict[str, Any]:
         self.requests.append((op, fields))
         if op == "human_input" and self.gate is not None:
             self.entered.set()
-            self.gate.wait(5)
+            assert self.gate.wait(5)
+            if self.fail_input:
+                raise ViewerError("refused late", self.fail_input)
         return {"ok": True}
 
 
@@ -251,9 +255,9 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         inputs.submit("keyboard_type", {"text": "a"})
         client.entered.wait(5)  # "a" is in flight
         inputs.submit("keyboard_press", {"keys": "Return"})  # queued behind it
-        handoff.give_back()
-        handoff.take()  # a quick new takeover
+        retake = _give_back_and_take(handoff)  # a quick new takeover, from the GTK side
         client.gate.set()
+        retake.join(5)
         _wait(lambda: inputs._q.empty())
         time.sleep(0.05)
     finally:
@@ -266,6 +270,88 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         ("takeover", None),
     ]  # the stale Return was dropped
     assert not inputs.submit("x", {}) or handoff.holding
+
+
+def _give_back_and_take(handoff: Handoff) -> threading.Thread:
+    def run() -> None:
+        handoff.give_back()
+        handoff.take()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.1)
+    return t
+
+
+def test_release_and_retake_wait_for_input_in_flight() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    client.gate = threading.Event()
+    sender = threading.Thread(target=handoff.send, args=("keyboard_press", {"keys": "Return"}))
+    sender.start()
+    client.entered.wait(5)  # past the generation check, request in flight
+    retake = _give_back_and_take(handoff)
+    assert [op for op, _ in client.requests] == ["takeover", "human_input"]  # release waits
+    client.gate.set()
+    sender.join(5)
+    retake.join(5)
+    assert [op for op, _ in client.requests] == ["takeover", "human_input", "release", "takeover"]
+    assert handoff.holding
+
+
+def test_late_failure_of_old_input_keeps_the_new_takeover() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    client.gate = threading.Event()
+    client.fail_input = "not_holder"
+
+    def send() -> None:
+        with contextlib.suppress(ViewerError):
+            handoff.send("keyboard_type", {"text": "a"})
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    client.entered.wait(5)
+    retake = _give_back_and_take(handoff)
+    client.gate.set()
+    sender.join(5)
+    retake.join(5)
+    assert handoff.holding  # the old request's failure did not clear the new takeover
+
+
+def _closing_owner(path: str) -> socket.socket:
+    """A server that reads the request and hangs up without a reply."""
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(8)
+
+    def serve() -> None:
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(4096)
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv
+
+
+def test_hang_up_without_reply_drops_control(tmp_path: Path) -> None:
+    path = str(tmp_path / "eof.sock")
+    srv = _closing_owner(path)
+    try:
+        handoff = Handoff(ControlClient(path), "human:test")
+        handoff.holding = True
+        with pytest.raises(ViewerError) as exc:
+            handoff.send("keyboard_type", {"text": "a"})
+        assert exc.value.code == "disconnected"
+        assert not handoff.holding
+    finally:
+        srv.close()
 
 
 def test_double_click_is_two_single_clicks() -> None:

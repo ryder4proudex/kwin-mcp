@@ -125,7 +125,7 @@ def read_session_file(path: str | os.PathLike[str]) -> SessionTarget:
 
 # Codes after which the viewer no longer holds control: it must take over again.
 LOST_CONTROL_CODES = frozenset(
-    {"not_holder", "not_running", "crashed", "disconnected", "forbidden"}
+    {"not_holder", "not_running", "crashed", "disconnected", "forbidden", "protocol"}
 )
 
 
@@ -195,6 +195,9 @@ class ControlClient:
             raise ViewerError(msg, "disconnected") from None
         finally:
             sock.close()
+        if not buf.endswith(b"\n"):
+            msg = f"the session owner closed the connection without answering {op}"
+            raise ViewerError(msg, "disconnected")
         try:
             reply = json.loads(buf)
         except ValueError:
@@ -214,7 +217,10 @@ class Handoff:
     """One human's lease on the owner's input: take, renew, use and give back.
 
     ``generation`` changes whenever control is taken, given back or lost, so input
-    queued under one takeover is never sent under a later one.
+    queued under one takeover is never sent under a later one. Every request runs
+    under one lock together with the state check before it and the state change
+    after it: a release or a new takeover waits for an input call in flight, and a
+    late failure of an old request can never clear a newer takeover.
     """
 
     def __init__(
@@ -225,52 +231,54 @@ class Handoff:
         self.lease_s = lease_s
         self.holding = False
         self.generation = 0
-        self._mu = threading.Lock()
+        self._io = threading.RLock()
 
     def _lose(self) -> None:
-        with self._mu:
-            if self.holding:
-                self.holding = False
-                self.generation += 1
+        if self.holding:
+            self.holding = False
+            self.generation += 1
 
     def take(self) -> dict[str, Any]:
         """Take control: the owner pauses the AI and releases its held input."""
-        reply = self.client.request("takeover", holder=self.holder, ttl_s=self.lease_s)
-        with self._mu:
+        with self._io:
+            reply = self.client.request("takeover", holder=self.holder, ttl_s=self.lease_s)
             self.holding = True
             self.generation += 1
-        return reply
+            return reply
 
     def heartbeat(self) -> None:
         """Renew the lease; any failure means control is lost (take over again)."""
-        if not self.holding:
-            return
-        try:
-            self.client.request("heartbeat", holder=self.holder, ttl_s=self.lease_s)
-        except ViewerError:
-            self._lose()
-            raise
+        with self._io:
+            if not self.holding:
+                return
+            try:
+                self.client.request("heartbeat", holder=self.holder, ttl_s=self.lease_s)
+            except ViewerError:
+                self._lose()
+                raise
 
     def give_back(self) -> None:
         """Return control at once (idempotent)."""
-        if not self.holding:
-            return
-        self._lose()
-        self.client.request("release", holder=self.holder)
+        with self._io:
+            if not self.holding:
+                return
+            self._lose()
+            self.client.request("release", holder=self.holder)
 
     def send(
         self, tool: str, args: dict[str, Any], generation: int | None = None
     ) -> dict[str, Any]:
         """Ask the owner to run one input tool for this holder (in ``generation``, if given)."""
-        if not self.holding or (generation is not None and generation != self.generation):
-            msg = "take control first: input goes to the session only while you hold the lease"
-            raise ViewerError(msg, "not_holder")
-        try:
-            return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
-        except ViewerError as exc:
-            if exc.code in LOST_CONTROL_CODES:
-                self._lose()
-            raise
+        with self._io:
+            if not self.holding or (generation is not None and generation != self.generation):
+                msg = "take control first: input goes to the session only while you hold the lease"
+                raise ViewerError(msg, "not_holder")
+            try:
+                return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
+            except ViewerError as exc:
+                if exc.code in LOST_CONTROL_CODES:
+                    self._lose()
+                raise
 
 
 class InputQueue:
