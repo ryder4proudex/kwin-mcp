@@ -231,53 +231,80 @@ class Handoff:
         self.lease_s = lease_s
         self.holding = False
         self.generation = 0
+        # _io orders take, give_back and send: a release or a new takeover waits for input
+        # already in flight. _state guards holding/generation and is never held across I/O, so
+        # heartbeats (and closing) never wait behind a slow input call.
         self._io = threading.RLock()
+        self._state = threading.Lock()
 
-    def _lose(self) -> None:
-        if self.holding:
-            self.holding = False
-            self.generation += 1
+    def _lose(self, generation: int | None = None) -> None:
+        """Drop control (only if still in ``generation``, when given)."""
+        with self._state:
+            if self.holding and (generation is None or generation == self.generation):
+                self.holding = False
+                self.generation += 1
+
+    def _current(self) -> int | None:
+        with self._state:
+            return self.generation if self.holding else None
 
     def take(self) -> dict[str, Any]:
         """Take control: the owner pauses the AI and releases its held input."""
         with self._io:
             reply = self.client.request("takeover", holder=self.holder, ttl_s=self.lease_s)
-            self.holding = True
-            self.generation += 1
+            with self._state:
+                self.holding = True
+                self.generation += 1
             return reply
 
     def heartbeat(self) -> None:
-        """Renew the lease; any failure means control is lost (take over again)."""
-        with self._io:
-            if not self.holding:
-                return
-            try:
-                self.client.request("heartbeat", holder=self.holder, ttl_s=self.lease_s)
-            except ViewerError:
-                self._lose()
-                raise
+        """Renew the lease; any failure means control is lost (take over again).
+
+        Runs beside input in flight; a failure of a heartbeat sent before a give-back and
+        a new takeover does not drop the new takeover.
+        """
+        generation = self._current()
+        if generation is None:
+            return
+        try:
+            self.client.request("heartbeat", holder=self.holder, ttl_s=self.lease_s)
+        except ViewerError:
+            self._lose(generation)
+            raise
 
     def give_back(self) -> None:
-        """Return control at once (idempotent)."""
+        """Return control at once (idempotent), after input already in flight."""
         with self._io:
-            if not self.holding:
+            if self._current() is None:
                 return
             self._lose()
             self.client.request("release", holder=self.holder)
+
+    def abandon(self) -> None:
+        """Return control without waiting for input in flight (the viewer is closing).
+
+        Queued input is dropped at once; a call already in flight is refused by the owner
+        once the lease is released (or freed with it), and no new takeover follows.
+        """
+        if self._current() is None:
+            return
+        self._lose()
+        self.client.request("release", holder=self.holder)
 
     def send(
         self, tool: str, args: dict[str, Any], generation: int | None = None
     ) -> dict[str, Any]:
         """Ask the owner to run one input tool for this holder (in ``generation``, if given)."""
         with self._io:
-            if not self.holding or (generation is not None and generation != self.generation):
+            current = self._current()
+            if current is None or (generation is not None and generation != current):
                 msg = "take control first: input goes to the session only while you hold the lease"
                 raise ViewerError(msg, "not_holder")
             try:
                 return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
             except ViewerError as exc:
                 if exc.code in LOST_CONTROL_CODES:
-                    self._lose()
+                    self._lose(current)
                 raise
 
 

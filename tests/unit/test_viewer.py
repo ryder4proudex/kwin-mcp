@@ -321,6 +321,67 @@ def test_late_failure_of_old_input_keeps_the_new_takeover() -> None:
     assert handoff.holding  # the old request's failure did not clear the new takeover
 
 
+def _input_in_flight(client: GatedClient, handoff: Handoff) -> threading.Thread:
+    client.gate = threading.Event()
+
+    def send() -> None:
+        with contextlib.suppress(ViewerError):
+            handoff.send("keyboard_type", {"text": "a"})
+
+    sender = threading.Thread(target=send)
+    sender.start()
+    assert client.entered.wait(5)
+    return sender
+
+
+def test_heartbeat_does_not_wait_for_input_in_flight() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    sender = _input_in_flight(client, handoff)
+    beat = threading.Thread(target=handoff.heartbeat)
+    beat.start()
+    beat.join(2)
+    assert not beat.is_alive()  # renewed while the slow input is still running
+    assert [op for op, _ in client.requests] == ["takeover", "human_input", "heartbeat"]
+    assert client.gate is not None
+    client.gate.set()
+    sender.join(5)
+
+
+def test_stale_heartbeat_failure_keeps_a_new_takeover() -> None:
+    class StaleBeat(GatedClient):
+        def request(self, op: str, **fields: Any) -> dict[str, Any]:
+            if op == "heartbeat":
+                handoff.give_back()
+                handoff.take()  # a new takeover completes while the heartbeat is out
+                raise ViewerError("lease expired", "not_holder")
+            return super().request(op, **fields)
+
+    client = StaleBeat()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    with pytest.raises(ViewerError):
+        handoff.heartbeat()
+    assert handoff.holding
+
+
+def test_abandon_does_not_wait_for_input_in_flight() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    sender = _input_in_flight(client, handoff)
+    closing = threading.Thread(target=handoff.abandon)
+    closing.start()
+    closing.join(2)
+    assert not closing.is_alive()
+    assert not handoff.holding
+    assert [op for op, _ in client.requests] == ["takeover", "human_input", "release"]
+    assert client.gate is not None
+    client.gate.set()
+    sender.join(5)
+
+
 def _closing_owner(path: str) -> socket.socket:
     """A server that reads the request and hangs up without a reply."""
     srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

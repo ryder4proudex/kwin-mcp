@@ -234,11 +234,18 @@ class ViewerWindow:
         return True
 
     def _on_close(self, _window: Gtk.Window) -> bool:
-        if self.handoff is not None and self.handoff.holding:
-            with contextlib.suppress(ViewerError):
-                self.handoff.give_back()
-        if self._inputs is not None:
-            self._inputs.close()
+        # Never block the main loop on the owner: hand control back and stop the input
+        # thread from a non-daemon thread, which the interpreter waits for before exiting.
+        handoff, inputs = self.handoff, self._inputs
+
+        def finish() -> None:
+            if handoff is not None:
+                with contextlib.suppress(ViewerError):
+                    handoff.abandon()
+            if inputs is not None:
+                inputs.close()
+
+        threading.Thread(target=finish, name="kwin-mcp-viewer-close").start()
         return False
 
 
