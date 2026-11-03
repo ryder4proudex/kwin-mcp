@@ -350,6 +350,7 @@ class IdleClock:
         self._lock = threading.Lock()
         self._active = 0
         self._last = clock()
+        self._closed = False
 
     def touch(self) -> None:
         with self._lock:
@@ -357,7 +358,10 @@ class IdleClock:
 
     @contextlib.contextmanager
     def busy(self) -> Iterator[None]:
+        """Count a request as in flight; raises ``IdleClosedError`` once the clock closed."""
         with self._lock:
+            if self._closed:
+                raise IdleClosedError(_SHUTDOWN_TEXT)
             self._active += 1
             self._last = self._clock()
         try:
@@ -371,6 +375,25 @@ class IdleClock:
         """Seconds since the last request ended, or None while one is in flight."""
         with self._lock:
             return None if self._active else self._clock() - self._last
+
+    def close_if_idle(self, limit: float) -> bool:
+        """Atomically: if idle for ``limit`` seconds, refuse every later ``busy()``.
+
+        The check and the close share the lock with ``busy()``, so a request either
+        started before (and the server stays up) or is refused after; none can slip
+        in between the idle decision and the exit.
+        """
+        with self._lock:
+            if self._closed:
+                return True
+            if self._active or self._clock() - self._last < limit:
+                return False
+            self._closed = True
+            return True
+
+
+class IdleClosedError(RuntimeError):
+    """A request arrived after the --idle-exit watcher decided to exit."""
 
 
 # Every request of this process; read by the --idle-exit watcher thread.
@@ -403,7 +426,10 @@ async def _on_tool_thread[T](fn: Callable[[], T]) -> T:
         if _shutdown.is_set():
             return False, None, _SHUTDOWN_TEXT
         try:
-            return True, fn(), ""
+            # Counted on the tool thread itself: a request whose await was cancelled
+            # leaves its body running here, and it must still keep --idle-exit off.
+            with _activity.busy():
+                return True, fn(), ""
         except Exception as exc:
             return False, None, str(exc)
 
@@ -1716,8 +1742,11 @@ class KwinServer(MCPServer[dict[str, Any]]):
         The check runs before argument validation and before any resolver, so a
         rejected call has no side effect and asks the user nothing.
         """
-        with _activity.busy():
-            return await self._call_tool(name, arguments, context)
+        try:
+            with _activity.busy():
+                return await self._call_tool(name, arguments, context)
+        except IdleClosedError as exc:
+            raise ToolError(str(exc)) from None
 
     async def _call_tool(
         self,
@@ -1775,7 +1804,7 @@ class KwinServer(MCPServer[dict[str, Any]]):
         try:
             with _activity.busy():
                 return await _on_tool_thread(fn)
-        except _ToolThreadError as exc:
+        except (_ToolThreadError, IdleClosedError) as exc:
             raise ResourceError(str(exc)) from None
 
     def _screenshot_bytes(self, name: str) -> bytes:
@@ -1910,8 +1939,12 @@ def _signal_watcher() -> NoReturn:
 
 def _idle_watcher(limit: int) -> NoReturn:
     """Exit via the shared finish routine once no request came for ``limit`` seconds."""
-    while (delay := idle_exit_delay(_activity, limit)) > 0:
-        time.sleep(delay)
+    while True:
+        delay = idle_exit_delay(_activity, limit)
+        if delay > 0:
+            time.sleep(delay)
+        elif _activity.close_if_idle(limit):
+            break
     _finish(0, f"kwin-mcp: no request for {limit} s (--idle-exit); exiting\n")
 
 

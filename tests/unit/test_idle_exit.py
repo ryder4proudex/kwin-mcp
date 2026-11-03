@@ -6,14 +6,15 @@ import asyncio
 import contextlib
 import subprocess
 import sys
+import threading
 import time
 from typing import TYPE_CHECKING
 
 import pytest
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
 
 from kwin_mcp import server
-from kwin_mcp.server import IdleClock, idle_exit_delay
+from kwin_mcp.server import IdleClock, IdleClosedError, idle_exit_delay
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -158,5 +159,80 @@ def test_requests_drive_the_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 
     asyncio.run(scenario())
     assert counting.touched == 1
-    assert counting.entered == 3
+    # The rejected call counts once; the call and the read that reach the tool
+    # thread count twice (the request, then its body on the tool thread).
+    assert counting.entered == 5
     assert counting.idle_for() is not None
+
+
+def test_close_if_idle_refuses_while_busy_or_too_recent() -> None:
+    clock = _FakeClock()
+    idle = IdleClock(clock)
+    clock.now += 10
+    assert not idle.close_if_idle(30)
+    with idle.busy():
+        clock.now += 100
+        assert not idle.close_if_idle(30)
+    assert not idle.close_if_idle(30)
+    clock.now += 30
+    assert idle.close_if_idle(30)
+    assert idle.close_if_idle(30)
+
+
+def test_busy_after_close_is_refused() -> None:
+    """The idle decision and the refusal share one lock: no request slips in between."""
+    clock = _FakeClock()
+    idle = IdleClock(clock)
+    clock.now += 60
+    assert idle.close_if_idle(30)
+    with pytest.raises(IdleClosedError), idle.busy():
+        pytest.fail("a request ran after the idle exit was decided")
+    assert idle.idle_for() is not None
+
+
+def test_requests_after_idle_close_are_answered_not_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _FakeClock()
+    closed = IdleClock(clock)
+    clock.now += 60
+    assert closed.close_if_idle(30)
+    monkeypatch.setattr(server, "_activity", closed)
+    built = server.build_server([])
+
+    async def scenario() -> None:
+        with pytest.raises(ToolError, match="shutting down"):
+            await built.call_tool("session_info", {})
+        with pytest.raises(ResourceError, match="shutting down"):
+            await built.read_resource("kwin://session")
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_request_stays_busy_while_its_body_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cancelling the await does not stop the tool thread; the body still counts."""
+    activity = IdleClock()
+    monkeypatch.setattr(server, "_activity", activity)
+    started = threading.Event()
+    release = threading.Event()
+
+    def body() -> str:
+        started.set()
+        release.wait(10)
+        return "done"
+
+    async def scenario() -> None:
+        task = asyncio.ensure_future(server._on_tool_thread(body))
+        assert await asyncio.to_thread(started.wait, 10)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(scenario())
+        assert activity.idle_for() is None
+        assert not activity.close_if_idle(0)
+    finally:
+        release.set()
+    deadline = time.monotonic() + 10
+    while activity.idle_for() is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert activity.idle_for() is not None
