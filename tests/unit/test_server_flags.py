@@ -20,6 +20,11 @@ _USAGE_ERROR_ARGV = [
     ["--live-consent"],
     ["--live-consent=elicit", "--live-consent=refuse"],
     ["--live-consent", "refuse", "--live-consent", "refuse"],
+    ["--idle-exit"],
+    ["--idle-exit", "-1"],
+    ["--idle-exit", "1.5"],
+    ["--idle-exit", "٣"],
+    ["--idle-exit=1", "--idle-exit=1"],
 ]
 
 
@@ -48,6 +53,8 @@ def test_live_consent_argv_parsing(argv: list[str], capsys: pytest.CaptureFixtur
             ServerFlags(default_live_session=True, screenshot_images=True, screenshot_max_edge=640),
         ),
         (["--screenshot-max-edge=0"], ServerFlags(screenshot_max_edge=0)),
+        (["--idle-exit", "1800"], ServerFlags(idle_exit=1800)),
+        (["--idle-exit=0"], ServerFlags(idle_exit=0)),
     ],
 )
 def test_valid_flags_parse(argv: list[str], expected: ServerFlags) -> None:
@@ -67,7 +74,7 @@ def test_build_server_applies_flags() -> None:
 
 
 def test_usage_lists_every_flag() -> None:
-    """``_USAGE`` (printed by ``-h``/``--help``) documents the four flags and help itself."""
+    """``_USAGE`` (printed by ``-h``/``--help``) documents the five flags and help itself."""
     usage = server._USAGE
     assert usage.startswith("usage: kwin-mcp ")
     for flag in (
@@ -76,6 +83,8 @@ def test_usage_lists_every_flag() -> None:
         "--screenshot-images",
         "--screenshot-max-edge N",
         "--live-consent {elicit,refuse}",
+        "--idle-exit SECONDS",
+        "--detach-live-on-exit",
     ):
         assert flag in usage, flag
     assert usage.rstrip().endswith("Documentation: https://github.com/isac322/kwin-mcp#readme")
@@ -86,4 +95,6 @@ def test_usage_lists_every_flag() -> None:
         "--screenshot-images",
         "--screenshot-max-edge",
         "--live-consent",
+        "--idle-exit",
+        "--detach-live-on-exit",
     ]

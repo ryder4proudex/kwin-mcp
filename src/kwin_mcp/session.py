@@ -323,6 +323,12 @@ class OwnedProcessRegistry:
     (``org.a11y.Status.IsEnabled``) kwin-mcp turned on, so ``terminate_all``
     turns it back off when ``session_stop`` cannot run. The switch and its
     record are atomic with respect to ``close()`` in the same way as a spawn.
+
+    Apps launched on a live desktop are spawned ``detachable``: a detaching exit
+    (``terminate_all(detach=True)``, ``LiveSession.detach``) leaves them and the
+    accessibility switch as they are, because the user may be working with them;
+    only the groups kwin-mcp owns privately (a virtual session and its apps) are
+    terminated.
     """
 
     def __init__(self) -> None:
@@ -332,6 +338,8 @@ class OwnedProcessRegistry:
         self._temp_dirs: list[Path] = []
         # Session bus addresses whose accessibility switch this process turned on.
         self._accessibility_restores: list[str] = []
+        # Leaders (by pid) of live-desktop apps, which a detaching exit leaves running.
+        self._detachable: set[int] = set()
         # Leaders (by pid) whose terminate_leaders escalation sits between the
         # SIGTERM and the last SIGKILL step: while marked, poll/wait/kill must
         # observe their exit without reaping so _leader_reaped keeps them owned.
@@ -356,8 +364,12 @@ class OwnedProcessRegistry:
         stderr: int | IO[bytes] | None = None,
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
+        detachable: bool = False,
     ) -> subprocess.Popen[bytes]:
         """Atomically spawn a process and register it as an owned leader.
+
+        ``detachable`` marks an app on a live desktop: a detaching exit leaves it
+        running instead of terminating its group.
 
         Holds the lock across ``subprocess.Popen`` and the registration. The
         keyword arguments are the subset of ``Popen``'s the session call sites
@@ -380,7 +392,29 @@ class OwnedProcessRegistry:
                 start_new_session=start_new_session,
             )
             self._processes[proc.pid] = proc
+            if detachable:
+                self._detachable.add(proc.pid)
+            else:
+                self._detachable.discard(proc.pid)
         return proc
+
+    def detach(self, leaders: list[subprocess.Popen[bytes]]) -> None:
+        """Stop owning ``leaders`` without signalling or reaping them.
+
+        Their groups keep running; no later ``terminate_all`` reaches them.
+        """
+        with self._lock:
+            for proc in leaders:
+                if self._processes.get(proc.pid) is proc:
+                    del self._processes[proc.pid]
+                self._detachable.discard(proc.pid)
+
+    def forget_accessibility(self, dbus_address: str) -> None:
+        """Leave a switch kwin-mcp turned on as it is: drop its restore record."""
+        with self._lock:
+            self._accessibility_restores = [
+                a for a in self._accessibility_restores if a != dbus_address
+            ]
 
     def register_temp_dir(self, path: Path) -> None:
         """Record a temp dir a session created, for ``terminate_all`` to remove.
@@ -615,8 +649,11 @@ class OwnedProcessRegistry:
             for leader in leaders:
                 self.reap(leader)
 
-    def terminate_all(self) -> None:
+    def terminate_all(self, *, detach: bool = False) -> None:
         """Signal every still-registered group (no reap) and remove owned temp dirs.
+
+        With ``detach`` the live-desktop app groups (spawned ``detachable``) are
+        left running and no accessibility switch is turned back off.
 
         Runs on the main thread after ``close()`` without touching the engine,
         through the same shared escalation ``session_stop`` uses (``reap=False``):
@@ -633,7 +670,10 @@ class OwnedProcessRegistry:
         PR2 accepted; reachable only if the wrapper exits on its own first).
         """
         with self._lock:
-            leaders = list(self._processes.values())
+            spared = self._detachable if detach else set()
+            leaders = [p for pid, p in self._processes.items() if pid not in spared]
+            if detach:
+                self._accessibility_restores.clear()
         self.terminate_leaders(leaders, reap=False)
         with self._lock:
             restores = list(self._accessibility_restores)
@@ -1669,6 +1709,7 @@ class LiveSession:
                 stdout=log_file,
                 stderr=log_file,
                 start_new_session=True,
+                detachable=True,
             )
 
         app_info = AppInfo(
@@ -1710,6 +1751,25 @@ class LiveSession:
         # A no-op unless this connection switched accessibility on.
         process_registry.restore_accessibility(self._info.dbus_address)
 
+        return self._drop_artifacts(keep_artifacts)
+
+    def detach(self) -> KeptPaths:
+        """Disconnect from the live session, leaving the desktop as it is.
+
+        Unlike ``stop``, apps launched through this connection keep running (the
+        user may be working with them) and an accessibility switch this
+        connection turned on stays on (other clients may rely on it); kwin-mcp
+        stops owning both. Used when the server exits without an explicit
+        ``session_stop`` (idle exit, or ``--detach-live-on-exit``).
+        """
+        if not self._running:
+            return KeptPaths()
+        self._running = False
+        process_registry.detach([app.process for app in self._info.apps.values()])
+        process_registry.forget_accessibility(self._info.dbus_address)
+        return self._drop_artifacts(self._retention.artifacts)
+
+    def _drop_artifacts(self, keep_artifacts: bool) -> KeptPaths:
         # Remove the live session's screenshot dir (registered at connect unless
         # retention.artifacts), mirroring the registry's retention semantics.
         # KWin of the live session was never recorded, so it is never touched

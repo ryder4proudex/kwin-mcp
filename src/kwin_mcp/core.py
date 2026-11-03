@@ -1144,6 +1144,14 @@ class AutomationEngine:
 
     def session_stop(self) -> SessionStopResult:
         """End the current session, releasing held input. Idempotent."""
+        return self._end_session(detach_live=False)
+
+    def _end_session(self, *, detach_live: bool) -> SessionStopResult:
+        """``session_stop``; with ``detach_live`` (a server exit nobody asked for) a
+        live session is detached instead of stopped, leaving the apps launched
+        through it and the accessibility switch as they are. A virtual session,
+        which the server owns, is always stopped.
+        """
         session = self._session
         if session is None:
             return SessionStopResult(stopped=False)
@@ -1163,7 +1171,10 @@ class AutomationEngine:
         # The AT-SPI worker is bound to this session's bus; stop it before the bus goes away.
         self._teardown_atspi_worker()
 
-        kept = session.stop()
+        if detach_live and isinstance(session, LiveSession):
+            kept = session.detach()
+        else:
+            kept = session.stop()
         self._reset_session_state()
         return SessionStopResult(
             stopped=True,

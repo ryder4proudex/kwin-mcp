@@ -83,6 +83,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
         stderr: int | IO[bytes] | None = None,
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
+        detachable: bool = False,
     ) -> subprocess.Popen[bytes]:
         if args[0] != "dbus-run-session":
             return real_spawn(
@@ -92,6 +93,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
                 stderr=stderr,
                 env=env,
                 start_new_session=start_new_session,
+                detachable=detachable,
             )
         observed.spawn_env.append(dict(env or {}))
         observed.registered_at_spawn.append(list(registry._temp_dirs))
@@ -349,3 +351,46 @@ def test_app_registry_lists_launches_and_tails_logs(harness: _Harness, tmp_path:
         live.stop()
     assert all(entry.running is False for entry in live.apps())
     assert not screenshot_dir.exists()
+
+
+def test_live_detach_leaves_launched_apps_and_the_a11y_switch(
+    harness: _Harness, tmp_path: Path
+) -> None:
+    """An exit without session_stop must not end apps the user may be working with."""
+    screenshot_dir = tmp_path / "live-artifacts"
+    screenshot_dir.mkdir()
+    harness.registry.register_temp_dir(screenshot_dir)
+    live = LiveSession(FAKE_DBUS_ADDRESS, "wayland-x", screenshot_dir)
+    app = live.launch_app(["sleep", "60"])
+    # As if this connection had switched accessibility on.
+    harness.registry._accessibility_restores.append(FAKE_DBUS_ADDRESS)
+    try:
+        assert live.detach() == KeptPaths()
+        assert app.pid not in harness.registry._processes
+        assert harness.registry._accessibility_restores == []
+        assert not screenshot_dir.exists()
+        # The exit path's sweep no longer reaches the detached app.
+        harness.registry.close()
+        harness.registry.terminate_all()
+        time.sleep(0.2)
+        assert app.process.poll() is None
+        assert live.detach() == KeptPaths()
+    finally:
+        app.process.kill()
+        app.process.wait()
+
+
+def test_detaching_sweep_spares_only_live_desktop_apps(harness: _Harness) -> None:
+    registry = harness.registry
+    live_app = registry.spawn(["sleep", "60"], start_new_session=True, detachable=True)
+    private = registry.spawn(["sleep", "60"], start_new_session=True)
+    registry._accessibility_restores.append(FAKE_DBUS_ADDRESS)
+    try:
+        registry.close()
+        registry.terminate_all(detach=True)
+        assert private.wait(timeout=10) is not None
+        assert live_app.poll() is None
+        assert registry._accessibility_restores == []
+    finally:
+        live_app.kill()
+        live_app.wait()
