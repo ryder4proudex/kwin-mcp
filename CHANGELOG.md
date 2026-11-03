@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--idle-exit SECONDS` server flag: the server exits (with the usual session cleanup, status 0) after `SECONDS` without a tool call, resource read or `tools/list` and with no call in flight. A keep-alive client that never closes stdin no longer keeps an unused server and its AT-SPI worker alive forever. Observed with mcporter 0.16's daemon, which keys keep-alive connections by the caller's whole environment and has no idle timeout by default: 16 `kwin-mcp` processes (about 1.4 GiB, mostly swapped) accumulated in one day, one per calling shell environment.
 - `element_query` can be scoped to one window and write large trees to a file. `window` takes a `WindowSelector` (as in `window_list`) and limits the walk to the AT-SPI top-levels mapped to the matching KWin windows, so one Chrome window is read without the other windows of the browser. `text_max_chars` sets the per-element text cap (default 200, `0` = whole text). `output_file` writes the elements as JSONL (one object per element, mode `0600`, symlinks refused) to an absolute `.jsonl` path and returns only a summary (`output_file`, `output_count`, `output_bytes`). The README documents `locator={"states": ["showing"]}` for on-screen elements only.
 
 ### Changed

@@ -15,7 +15,8 @@ the lossless ``result.render()`` text. ``KwinServer`` adds three things to the S
 
 Server flags: ``--default-live-session`` (description and instructions sentences only),
 ``--screenshot-images`` (one ImageContent per captured frame),
-``--screenshot-max-edge N`` and ``--live-consent=elicit|refuse``.
+``--screenshot-max-edge N``, ``--live-consent=elicit|refuse`` and ``--idle-exit SECONDS``
+(exit after that long without a request).
 """
 
 import argparse
@@ -33,9 +34,10 @@ import re
 import signal
 import sys
 import threading
+import time
 import traceback
 import typing
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,6 +153,8 @@ class ServerFlags:
     # 0 = no limit.
     screenshot_max_edge: int = 0
     live_consent: LiveConsent = "elicit"
+    # Seconds without a request after which the server exits; 0 = never.
+    idle_exit: int = 0
 
 
 def _max_edge_value(text: str) -> int:
@@ -162,12 +166,20 @@ def _max_edge_value(text: str) -> int:
     return int(text)
 
 
+def _idle_exit_value(text: str) -> int:
+    """Parse an ``--idle-exit`` value: ASCII seconds, 0 meaning never."""
+    if re.fullmatch(r"[0-9]+", text) is None:
+        msg = f"needs a number of seconds (0 = never), got {text!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return int(text)
+
+
 def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     """Parse the server flags in ``argv`` (``sys.argv[1:]``); ``-h``/``--help`` is not one.
 
     ``main`` answers help before this runs. An unknown option, an abbreviation, a
-    positional argument, an invalid or repeated ``--screenshot-max-edge`` or
-    ``--live-consent``, or a ``--live-consent`` without a value is a usage error:
+    positional argument, an invalid or repeated ``--screenshot-max-edge``,
+    ``--live-consent`` or ``--idle-exit``, or one of them without a value is a usage error:
     argparse prints the usage and the error to stderr and exits 2.
     """
     parser = argparse.ArgumentParser(prog="kwin-mcp", add_help=False, allow_abbrev=False)
@@ -175,6 +187,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     parser.add_argument("--screenshot-images", action="store_true")
     parser.add_argument("--screenshot-max-edge", type=_max_edge_value, action="append", metavar="N")
     parser.add_argument("--live-consent", choices=("elicit", "refuse"), action="append")
+    parser.add_argument("--idle-exit", type=_idle_exit_value, action="append", metavar="SECONDS")
     args = parser.parse_args(list(argv))
     edges: list[int] = args.screenshot_max_edge or []
     if len(edges) > 1:
@@ -182,11 +195,15 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     consents: list[LiveConsent] = args.live_consent or []
     if len(consents) > 1:
         parser.error("--live-consent may only be specified once")
+    idle_exits: list[int] = args.idle_exit or []
+    if len(idle_exits) > 1:
+        parser.error("--idle-exit may only be specified once")
     return ServerFlags(
         default_live_session=args.default_live_session,
         screenshot_images=args.screenshot_images,
         screenshot_max_edge=edges[0] if edges else 0,
         live_consent=consents[0] if consents else "elicit",
+        idle_exit=idle_exits[0] if idle_exits else 0,
     )
 
 
@@ -194,7 +211,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
 # runs ``kwin-mcp --help`` gets an answer instead of a silent stdio server.
 _USAGE = """\
 usage: kwin-mcp [-h] [--default-live-session] [--screenshot-images] [--screenshot-max-edge N]
-                [--live-consent {elicit,refuse}]
+                [--live-consent {elicit,refuse}] [--idle-exit SECONDS]
 
 kwin-mcp: MCP server for GUI automation on KDE Plasma 6 Wayland.
 
@@ -219,6 +236,10 @@ options:
                           elicit (the default) shows a confirmation form when the
                           client supports one, refuse never asks and refuses the
                           close; may be given once
+  --idle-exit SECONDS     exit (stopping the session like any other exit) after
+                          SECONDS without a tool call or resource read and with none
+                          in flight (0 = never, the default); for clients that keep
+                          the server alive but may never close it; may be given once
 
 Documentation: https://github.com/isac322/kwin-mcp#readme
 """
@@ -311,6 +332,59 @@ EXIT_DRAIN_SECONDS = 2.0
 # traceback on a server failure). The write runs on a daemon thread that os._exit
 # abandons, so a client that stopped draining stderr cannot hold the exit.
 EXIT_REPORT_SECONDS = 1.0
+
+
+class IdleClock:
+    """Request activity for ``--idle-exit``: when the last request ended, and how many run.
+
+    A keep-alive client (e.g. a connection pool that keys connections by the caller's
+    environment) may hold the stdio pipes open forever without sending another request,
+    so stdin EOF never comes; ``--idle-exit`` ends such a server instead.
+    ``busy()`` brackets every tool call and resource read, including the time a
+    resolver waits for the user's consent; ``touch()`` marks a cheap request.
+    Thread-safe; ``clock`` is injectable for tests.
+    """
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._active = 0
+        self._last = clock()
+
+    def touch(self) -> None:
+        with self._lock:
+            self._last = self._clock()
+
+    @contextlib.contextmanager
+    def busy(self) -> Iterator[None]:
+        with self._lock:
+            self._active += 1
+            self._last = self._clock()
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._active -= 1
+                self._last = self._clock()
+
+    def idle_for(self) -> float | None:
+        """Seconds since the last request ended, or None while one is in flight."""
+        with self._lock:
+            return None if self._active else self._clock() - self._last
+
+
+# Every request of this process; read by the --idle-exit watcher thread.
+_activity = IdleClock()
+# How often the --idle-exit watcher looks again while a request is in flight.
+IDLE_BUSY_POLL_SECONDS = 1.0
+
+
+def idle_exit_delay(clock: IdleClock, limit: float) -> float:
+    """Seconds the --idle-exit watcher should sleep before it looks again; 0 = exit now."""
+    idle = clock.idle_for()
+    if idle is None:
+        return min(IDLE_BUSY_POLL_SECONDS, limit)
+    return max(limit - idle, 0.0)
 
 
 class _ToolThreadError(Exception):
@@ -1614,6 +1688,7 @@ class KwinServer(MCPServer[dict[str, Any]]):
 
     async def list_tools(self) -> list[MCPTool]:
         """The static tool list with compacted schemas, computed once per server."""
+        _activity.touch()
         if self._listing is None:
             self._listing = [
                 tool.model_copy(
@@ -1641,6 +1716,15 @@ class KwinServer(MCPServer[dict[str, Any]]):
         The check runs before argument validation and before any resolver, so a
         rejected call has no side effect and asks the user nothing.
         """
+        with _activity.busy():
+            return await self._call_tool(name, arguments, context)
+
+    async def _call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        context: Context[dict[str, Any], Any] | None,
+    ) -> CallToolResult | InputRequiredResult:
         removed = removed_tool_text(name)
         if removed is not None:
             raise ToolError(removed)
@@ -1689,7 +1773,8 @@ class KwinServer(MCPServer[dict[str, Any]]):
 
     async def _read[T](self, fn: Callable[[], T]) -> T:
         try:
-            return await _on_tool_thread(fn)
+            with _activity.busy():
+                return await _on_tool_thread(fn)
         except _ToolThreadError as exc:
             raise ResourceError(str(exc)) from None
 
@@ -1823,6 +1908,13 @@ def _signal_watcher() -> NoReturn:
     _finish(128 + _signal_signum)
 
 
+def _idle_watcher(limit: int) -> NoReturn:
+    """Exit via the shared finish routine once no request came for ``limit`` seconds."""
+    while (delay := idle_exit_delay(_activity, limit)) > 0:
+        time.sleep(delay)
+    _finish(0, f"kwin-mcp: no request for {limit} s (--idle-exit); exiting\n")
+
+
 def _exit_cleanup() -> str:
     """Stop the session (or terminate the owned groups) at server exit; return the outcome."""
     server = _server
@@ -1898,7 +1990,8 @@ def _finish(exit_code: int, failure: str = "") -> NoReturn:
     Whichever path arrives first — the watcher thread after a signal or the main
     thread when the server's ``run()`` ends — owns the cleanup; a second caller blocks
     in ``_finish_lock.acquire()`` until the process exits, so the stop can never run
-    twice. ``failure`` is a traceback reported ahead of the cleanup outcome.
+    twice. ``failure`` is a traceback (or the idle-exit reason) reported ahead of the
+    cleanup outcome.
     """
     _finish_lock.acquire()
     # First statement under the lock: work queued on the tool thread from now on
@@ -1955,6 +2048,13 @@ def main() -> None:
         signal.signal(signum, _shutdown_handler)
     # Daemon: a still-pending wait must not keep the process alive on the EOF path.
     threading.Thread(target=_signal_watcher, name="kwin-mcp-shutdown", daemon=True).start()
+    if server.flags.idle_exit:
+        threading.Thread(
+            target=_idle_watcher,
+            args=(server.flags.idle_exit,),
+            name="kwin-mcp-idle-exit",
+            daemon=True,
+        ).start()
     exit_code = 0
     failure = ""
     try:

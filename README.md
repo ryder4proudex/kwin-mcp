@@ -236,7 +236,7 @@ kwin-mcp> session_stop
 
 ## Server Flags
 
-The server accepts only `--default-live-session`, `--screenshot-images`, `--screenshot-max-edge N`, `--live-consent {elicit,refuse}`, and `-h`/`--help`. `-h`/`--help` anywhere on the command line prints the usage and exits 0, whatever else is present. An unknown option, an abbreviation such as `--default`, a positional argument, a `--screenshot-max-edge` value that is not ASCII digits, a `--live-consent` value other than `elicit` or `refuse`, a flag without its value, or a repeated `--screenshot-max-edge` or `--live-consent` is a usage error: the server prints the usage and `kwin-mcp: error: ...` to stderr and exits with status 2 without starting.
+The server accepts only `--default-live-session`, `--screenshot-images`, `--screenshot-max-edge N`, `--live-consent {elicit,refuse}`, `--idle-exit SECONDS`, and `-h`/`--help`. `-h`/`--help` anywhere on the command line prints the usage and exits 0, whatever else is present. An unknown option, an abbreviation such as `--default`, a positional argument, a `--screenshot-max-edge` or `--idle-exit` value that is not ASCII digits, a `--live-consent` value other than `elicit` or `refuse`, a flag without its value, or a repeated `--screenshot-max-edge`, `--live-consent` or `--idle-exit` is a usage error: the server prints the usage and `kwin-mcp: error: ...` to stderr and exits with status 2 without starting.
 
 | Flag | Effect |
 |------|--------|
@@ -244,6 +244,7 @@ The server accepts only `--default-live-session`, `--screenshot-images`, `--scre
 | `--screenshot-images` | Attaches every captured frame to the tool result as MCP `image` content. See [Screenshot Images in Tool Results](#screenshot-images-in-tool-results---screenshot-images). |
 | `--screenshot-max-edge N` | Downscales every captured frame so its longer side is at most `N` pixels (`0`, the default, keeps full resolution). See [Screenshot Size](#screenshot-size---screenshot-max-edge-region-max_edge). |
 | `--live-consent {elicit,refuse}` | How `window_close` on a live desktop asks the user first. See [Live Window Close Consent](#live-window-close-consent---live-consent). |
+| `--idle-exit SECONDS` | Exits with status 0 after `SECONDS` without a tool call, resource read or `tools/list` and with no tool call in flight (`0`, the default, never exits on idle). The exit runs the same cleanup as stdin EOF or SIGTERM: the session is stopped, held input released and launched apps terminated. Use it with clients that keep a server alive but may never close it, such as a keep-alive pool that opens a new connection per caller environment; the client starts a fresh server on its next call. |
 
 ### Screenshot Images in Tool Results (`--screenshot-images`)
 
