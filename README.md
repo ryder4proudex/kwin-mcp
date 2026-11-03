@@ -222,6 +222,9 @@ kwin-mcp --screenshot-images --screenshot-max-edge 2576
 
 # Never ask before closing a window on the live desktop; refuse instead
 kwin-mcp --live-consent refuse
+
+# Watch another session read-only, with optional takeover (see Observers and Handoff)
+kwin-mcp-viewer --session-file owner.json --control-socket owner.sock
 ```
 
 `kwin-mcp-cli` exposes the same 29 tools as commands with the same names and parameters, and prints the same text the MCP server returns. Arguments are `key=value` pairs; object, list and union parameters take JSON:
@@ -300,7 +303,7 @@ kwin-mcp registers 29 tools. Parameters are listed in schema order: a bare name 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `session_start` | `screen_width?=1920`, `screen_height?=1080`, `enable_clipboard?=false`, `home?="host"`, `retention?={"artifacts":false,"home":false}` | Start an isolated virtual KWin Wayland session (one at a time) with its own `dbus-run-session` bus, `kwin_wayland --virtual` compositor, AT-SPI2 bus and EIS input. `screen_width`/`screen_height` must be positive integers. `enable_clipboard=true` serves the clipboard tools (off by default because `wl-copy` can hang on a freshly created bus). `home="isolated"` gives launched apps a temporary HOME with isolated XDG directories (not a security sandbox; see [Isolation scope](#isolation-scope)). `retention={artifacts, home}` decides now what survives the session end: the artifacts directory (screenshots, frames, app logs) and the isolated HOME; `home=true` requires `home="isolated"`. Startup is deadline-bounded and atomic: a failed step stops the partly started session and reports the captured session stderr. Then launch apps with `app_launch`. |
-| `session_connect` | `dbus_address?=""`, `wayland_display?=""`, `enable_accessibility?=false`, `retention?={"artifacts":false,"home":false}` | Attach to an already running KWin session: the real desktop or a KWin inside a container. Empty values default to `$DBUS_SESSION_BUS_ADDRESS` and `$WAYLAND_DISPLAY` (a socket name is resolved under `$XDG_RUNTIME_DIR`). Clipboard is always enabled. Actions affect real applications, and `window_close` asks the user first (see [Live Window Close Consent](#live-window-close-consent---live-consent)). `enable_accessibility=true` turns on the desktop's `org.a11y.Status.IsEnabled` switch until `session_stop` (see [Accessibility Tree](#accessibility-tree)). `retention.home` is an error here; live sessions use the host HOME. |
+| `session_connect` | `dbus_address?=""`, `wayland_display?=""`, `enable_accessibility?=false`, `retention?={"artifacts":false,"home":false}`, `observe?=false` | Attach to an already running KWin session: the real desktop or a KWin inside a container. Empty values default to `$DBUS_SESSION_BUS_ADDRESS` and `$WAYLAND_DISPLAY` (a socket name is resolved under `$XDG_RUNTIME_DIR`). Clipboard is always enabled, except for observers: `observe=true` attaches a read-only observer of a session another process owns (no input backend, no clipboard; app launch, element actions, window and D-Bus tools are refused; `session_stop` only detaches; see [Observers and Handoff](#observers-and-handoff)). Actions affect real applications, and `window_close` asks the user first (see [Live Window Close Consent](#live-window-close-consent---live-consent)). `enable_accessibility=true` turns on the desktop's `org.a11y.Status.IsEnabled` switch until `session_stop` (see [Accessibility Tree](#accessibility-tree)). `retention.home` is an error here; live sessions use the host HOME. |
 | `session_stop` | _(none)_ | End the current session. Virtual: terminate the whole session process group (`SIGTERM`, then `SIGKILL` for members that remain), KWin, launched apps and the bus. Live: detach, kill only apps launched through kwin-mcp, restore the accessibility switch. Releases all held input and reports it. Idempotent: with no session it returns `stopped: false` and `No session running.` |
 | `session_info` | _(none)_ | Report the current session (or `null`): its kind, Wayland socket, bus address, screen size, enabled backends (input, clipboard, accessibility), retention and artifacts directory, every app launched through kwin-mcp, and the held input. Works without a session. |
 
@@ -467,6 +470,30 @@ When the MCP server process ends — on stdio EOF, `SIGTERM`, `SIGHUP`, or `SIGI
 The final stop runs on the same single thread as tool calls, serialized with any in-flight tool. If a running tool still holds that thread after a 2 s drain, the server instead terminates the process groups it spawned directly and removes the temporary directories `session_stop` would remove for the session's `retention`. `kwin-mcp-cli` stops the session on `SIGTERM`/`SIGHUP` through the same path as Ctrl-C, and on exit also terminates any owned process group that was never attached to a session.
 
 Known limits: `SIGKILL` runs no cleanup, so with `retention.artifacts=false` the session's `/tmp/kwin-mcp-screenshots-*` artifacts directory leaks when the server is killed with `SIGKILL` (remove it by hand); the next session never reuses it and always creates a fresh directory. A descendant that leaves its launched process group (a double-fork or `setsid` daemon) escapes; and a process group whose leader was already reaped is left alone, because ownership can no longer be proven.
+
+### Observers and Handoff
+
+`session_connect(observe=true)` attaches a read-only observer to a session that another process owns, for example a virtual session started by an agent. The observer opens no input backend (EIS) and no clipboard, and refuses `app_launch`, `element_act`, the window mutators and `dbus_call` with an `Observer session` error; it can list windows, query elements and capture the screen. `session_stop` on an observer only detaches: the owner's compositor and apps keep running, because an observer never launched anything. `enable_accessibility=true` is refused with `observe=true`, so an observer never changes the session.
+
+`kwin-mcp-viewer` is a small GTK 4 window built on that observer. It polls `screen_capture` and shows the screen; it listens on no network port.
+
+```bash
+# Watch only (read-only)
+kwin-mcp-viewer --dbus-address unix:path=/run/user/1000/... --wayland-display /run/user/1000/wayland-...
+# Watch a session whose owner writes a state file and offers a control socket
+kwin-mcp-viewer --session-file owner.json --control-socket owner.sock
+```
+
+The session file is JSON with `dbus_address` and `wayland_socket` (or `wayland_display`). Taking control is the owner's decision: with `--control-socket` the viewer speaks a one-line-JSON handoff protocol over that local Unix socket, and the owner runs any input itself.
+
+| Request | Owner's duty |
+|---|---|
+| `{"op":"takeover","holder":H,"ttl_s":T}` | pause AI input, release keys and buttons the AI still holds, grant `H` a lease of `T` seconds |
+| `{"op":"heartbeat","holder":H,"ttl_s":T}` | renew the lease (`not_holder` error when `H` lost it) |
+| `{"op":"release","holder":H}` | return control to the AI at once |
+| `{"op":"human_input","holder":H,"tool":NAME,"args":{...}}` | run one pointer or keyboard tool only while `H` holds the lease |
+
+Replies are `{"ok":true,...}` or `{"ok":false,"code":C,"error":E}`. One holder controls input at a time. The viewer sends heartbeats every third of its lease (`--lease`, default 60 s) and releases on close; if it dies, the lease expires and the AI resumes. While the viewer holds control, clicks and scrolls on the picture are mapped to session coordinates through the frame's image mapping and sent as `pointer_click` and `pointer_scroll`, every press as one click (a double click is two presses), and keys as `keyboard_press` (named keys and chords) or `keyboard_type` (characters). The viewer talks only to a control socket served by its own user (checked with `SO_PEERCRED` and the socket file's owner before anything is sent), and a lost connection drops control at once. Input goes out in order through one sender; input still queued when control is given back or lost is dropped, and a release or a new takeover waits for input already in flight, so nothing is sent under a later takeover. A reply-less hang-up drops control like a reset. Heartbeats and closing the window never wait for a slow input call. Closing the viewer never stops the observed session. Like every session layer here, this isolates GUI input and focus only; it is not a process sandbox (see [Isolation scope](#isolation-scope)).
 
 ### Input Injection
 

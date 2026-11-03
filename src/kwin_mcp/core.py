@@ -130,6 +130,10 @@ NO_INPUT_TEXT = (
     "No input backend (KWin EIS unavailable); install kwin-common or reconnect.\n"
     "Call session_stop, then session_start or session_connect again."
 )
+OBSERVER_TEXT = (
+    "Observer session: read-only (no input, clipboard, app launch, window or D-Bus actions).\n"
+    "Ask the session owner for control, or connect without observe=true."
+)
 NO_CLIPBOARD_TEXT = (
     "Clipboard not enabled.\n"
     "Pass enable_clipboard=true to session_start, or use session_connect "
@@ -456,6 +460,9 @@ class AutomationEngine:
         self._session: Session | LiveSession | None = None
         self._input: InputBackend | None = None
         self._clipboard_enabled: bool = False
+        # session_connect(observe=True): a read-only observer of a session another
+        # process owns; it never gets an input backend or the clipboard.
+        self._observe: bool = False
         # What session_start/session_connect decided, reported by session_info.
         self._retention: Retention = NO_RETENTION
         self._screen: ScreenSize | None = None
@@ -486,14 +493,20 @@ class AutomationEngine:
         if self._session is not None and self._session.is_running:
             raise RuntimeError(SESSION_RUNNING_TEXT)
 
+    def _require_control(self) -> Session | LiveSession:
+        session = self._require_session()
+        if self._observe:
+            raise RuntimeError(OBSERVER_TEXT)
+        return session
+
     def _require_input(self) -> InputBackend:
-        self._require_session()
+        self._require_control()
         if self._input is None:
             raise RuntimeError(NO_INPUT_TEXT)
         return self._input
 
     def _require_clipboard(self) -> None:
-        self._require_session()
+        self._require_control()
         if not self._clipboard_enabled:
             raise RuntimeError(NO_CLIPBOARD_TEXT)
 
@@ -894,6 +907,7 @@ class AutomationEngine:
             input_backend="eis" if self._input is not None and not self._eis_lost else None,
             clipboard=self._clipboard_enabled,
             accessibility=self._accessibility,
+            observer=self._observe,
             warnings=list(self._session_warnings),
         )
 
@@ -906,6 +920,7 @@ class AutomationEngine:
         self._accessibility = "on"
         self._session_warnings = []
         self._eis_lost = False
+        self._observe = False
 
     # ── Session ───────────────────────────────────────────────────────────
 
@@ -1002,12 +1017,24 @@ class AutomationEngine:
         wayland_display: str = "",
         enable_accessibility: bool = False,
         retention: Retention = NO_RETENTION,
+        observe: bool = False,
     ) -> SessionInfo:
         """Attach to an already running KWin session (the real desktop or a container).
 
         ``enable_accessibility`` switches ``org.a11y.Status.IsEnabled`` on for the
         connection when it is off; ``session_stop`` switches it back off.
+
+        ``observe`` attaches a read-only observer that does not own the session: no
+        input backend (EIS) is opened and the clipboard stays off, input, clipboard,
+        app launch, window and D-Bus tools are refused, and ``session_stop`` only
+        detaches (the owner's compositor and apps keep running).
         """
+        if observe and enable_accessibility:
+            msg = (
+                "enable_accessibility is not available with observe=true: an observer "
+                "never changes the session.\nDrop enable_accessibility."
+            )
+            raise ValueError(msg)
         if retention.home:
             msg = (
                 "retention.home is not available on session_connect: live sessions use "
@@ -1088,17 +1115,21 @@ class AutomationEngine:
         self._session = session
         self._retention = retention
         self._eis_lost = False
-        # Clipboard is always available on live sessions
-        self._clipboard_enabled = True
+        self._observe = observe
+        # Clipboard is always available on live sessions, never to observers
+        self._clipboard_enabled = not observe
 
         warnings: list[str] = []
-        # The check above already found org.kde.KWin owned, so no settle delay
-        # is needed before the EIS connection.
-        try:
-            self._input = InputBackend(dbus_addr)
-        except RuntimeError as exc:
+        if observe:
             self._input = None
-            warnings.append(f"No input backend available ({exc})")
+        else:
+            # The check above already found org.kde.KWin owned, so no settle delay
+            # is needed before the EIS connection.
+            try:
+                self._input = InputBackend(dbus_addr)
+            except RuntimeError as exc:
+                self._input = None
+                warnings.append(f"No input backend available ({exc})")
 
         self._accessibility = self._live_accessibility(
             session, dbus_addr, enable=enable_accessibility, warnings=warnings
@@ -1206,7 +1237,7 @@ class AutomationEngine:
     def app_launch(self, command: str, env: dict[str, str] | None = None) -> AppLaunchResult:
         """Launch a program in the session (shlex-split, no shell); output goes to a log."""
         argv = _split_command(command, "command")
-        session = self._require_session()
+        session = self._require_control()
         try:
             app = session.launch_app(argv, extra_env=env)
         except (OSError, RuntimeError) as exc:
@@ -1400,7 +1431,7 @@ class AutomationEngine:
             if name.lower() not in seen:
                 seen.add(name.lower())
                 actions.append(name)
-        self._require_session()
+        self._require_control()
         address: dict[str, object]
         if isinstance(element, RefAddr):
             self._check_ref(element.ref)
@@ -1471,7 +1502,7 @@ class AutomationEngine:
     ) -> WindowFocusResult:
         """Raise and activate exactly one window, then read it back."""
         _check_selector(window)
-        self._require_session()
+        self._require_control()
         target = select_one(self._windows(), window)
         resp = self._run_kwin_query({"op": "activate", "window_id": target.id})
         if not resp["ok"]:
@@ -1522,7 +1553,7 @@ class AutomationEngine:
                 requested.append((field, value))
 
         _check_selector(window)
-        self._require_session()
+        self._require_control()
         target = select_one(self._windows(), window)
         window_id = target.id
 
@@ -1724,7 +1755,7 @@ class AutomationEngine:
         window mutator does.
         """
         _check_selector(window)
-        self._require_session()
+        self._require_control()
         windows = self._windows()
         if window.id is not None and window.model_copy(update={"id": None}).is_empty():
             matches = [w for w in windows if w.id == window.id]
@@ -2229,6 +2260,7 @@ class AutomationEngine:
 
         from kwin_mcp.dbus_args import parse_arg
 
+        self._require_control()
         info = self._require_info()
         if not info.dbus_address:
             msg = "D-Bus call failed: session has no D-Bus address"

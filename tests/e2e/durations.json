@@ -40,6 +40,7 @@
   "tests/e2e/test_mcp_session_observation.py": 27.9,
   "tests/e2e/test_mcp_stdin_isolation.py": 4.9,
   "tests/e2e/test_mcp_unknown_args.py": 12.7,
+  "tests/e2e/test_observer.py": 6.0,
   "tests/e2e/test_oracles.py": 24.5,
   "tests/e2e/test_pointer_click.py": 47.2,
   "tests/e2e/test_pointer_drag.py": 44.1,

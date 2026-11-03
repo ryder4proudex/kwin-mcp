@@ -69,6 +69,7 @@ Documentation = "https://github.com/isac322/kwin-mcp#readme"
 [project.scripts]
 kwin-mcp = "kwin_mcp.server:main"
 kwin-mcp-cli = "kwin_mcp.cli:main"
+kwin-mcp-viewer = "kwin_mcp.viewer:cli"
 
 [build-system]
 requires = ["uv_build>=0.12.19,<0.14.0"]
@@ -131,6 +132,7 @@ include = [
     "src/kwin_mcp/accessibility.py",
     "src/kwin_mcp/geometry.py",
     "src/kwin_mcp/server.py",
+    "src/kwin_mcp/viewer_gtk.py",
     "tests/e2e/gui_probe.py",
     "tests/e2e/interaction_probe.py",
     "tests/e2e/test_dbus_call.py",

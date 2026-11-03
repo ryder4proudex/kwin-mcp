@@ -38,6 +38,9 @@ KNOWN_LIMIT_PREFIXES: Final[tuple[str, ...]] = (
     "known KWin limit: release from a second EIS device does not clear another device's press",
     # QA-INP-047: KWin keeps emulated input held after the EIS client vanishes.
     "KWin limit: emulated state survives client disconnect",
+    # test_observer.py: kwin-mcp-viewer is a GTK 4 app; images without GTK 4 typelibs
+    # skip only the viewer test (KWIN_MCP_E2E_REQUIRE=gtk4 makes it fail instead).
+    "GTK 4 unavailable: kwin-mcp-viewer needs the Gtk 4.0 typelib",
     # QA-INP-047: KWin 6.7.5 (Fedora 44, Tumbleweed, Arch) crashes (SIGSEGV) when an
     # EIS client holding a button and a key is SIGKILLed; KWin 6.3.6 (Debian) survives.
     "KWin limit: KWin crashes when a killed EIS client held input",

@@ -1066,10 +1066,17 @@ class SessionInfo(BaseModel):
     input_backend: Literal["eis"] | None
     clipboard: bool
     accessibility: AccessibilityState
+    observer: bool = Field(
+        default=False,
+        description="Read-only observer of a session another process owns (session_connect "
+        "observe=true): no input, clipboard or actions; session_stop only detaches.",
+    )
     warnings: list[str] = Field(default_factory=list)
 
     def _detail_lines(self) -> list[str]:
         lines: list[str] = []
+        if self.observer:
+            lines.append("Observer: read-only (no input, clipboard or actions)")
         if self.home_dir is not None:
             lines.append(f"Isolated home: {self.home_dir}")
         screen = "unknown" if self.screen is None else f"{self.screen.width}x{self.screen.height}"
