@@ -222,6 +222,15 @@ def _leader_reaped(pid: int) -> bool:
     return False
 
 
+def _owned(leader: subprocess.Popen[bytes]) -> bool:
+    """Whether ``leader`` is still an unreaped child of this process.
+
+    ``returncode`` set means this very ``Popen`` was reaped, even if a newer
+    child now has the same pid (which ``_leader_reaped`` alone would accept).
+    """
+    return leader.returncode is None and not _leader_reaped(leader.pid)
+
+
 def _wait_for_leader_groups_exit(leaders: list[subprocess.Popen[bytes]], timeout: float) -> None:
     """Block until every leader's process group is empty or timeout elapses."""
     deadline = time.monotonic() + timeout
@@ -340,6 +349,10 @@ class OwnedProcessRegistry:
         self._accessibility_restores: list[str] = []
         # Leaders (by pid) of live-desktop apps, which a detaching exit leaves running.
         self._detachable: set[int] = set()
+        # Leaders (by pid) of launched apps, which ``reap_finished`` may reap once their
+        # group is empty. Session wrappers are not: ``Session.stop`` signals their group
+        # outside the registry.
+        self._sweepable: set[int] = set()
         # Leaders (by pid) whose terminate_leaders escalation sits between the
         # SIGTERM and the last SIGKILL step: while marked, poll/wait/kill must
         # observe their exit without reaping so _leader_reaped keeps them owned.
@@ -365,11 +378,13 @@ class OwnedProcessRegistry:
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
         detachable: bool = False,
+        sweepable: bool = False,
     ) -> subprocess.Popen[bytes]:
         """Atomically spawn a process and register it as an owned leader.
 
         ``detachable`` marks an app on a live desktop: a detaching exit leaves it
-        running instead of terminating its group.
+        running instead of terminating its group. ``sweepable`` marks a launched
+        app that ``reap_finished`` may reap once it exited and its group is empty.
 
         Holds the lock across ``subprocess.Popen`` and the registration. The
         keyword arguments are the subset of ``Popen``'s the session call sites
@@ -396,6 +411,10 @@ class OwnedProcessRegistry:
                 self._detachable.add(proc.pid)
             else:
                 self._detachable.discard(proc.pid)
+            if sweepable:
+                self._sweepable.add(proc.pid)
+            else:
+                self._sweepable.discard(proc.pid)
         return proc
 
     def detach(self, leaders: list[subprocess.Popen[bytes]]) -> None:
@@ -405,9 +424,7 @@ class OwnedProcessRegistry:
         """
         with self._lock:
             for proc in leaders:
-                if self._processes.get(proc.pid) is proc:
-                    del self._processes[proc.pid]
-                self._detachable.discard(proc.pid)
+                self._unregister_locked(proc)
 
     def forget_accessibility(self, dbus_address: str) -> None:
         """Leave a switch kwin-mcp turned on as it is: drop its restore record."""
@@ -477,6 +494,17 @@ class OwnedProcessRegistry:
             with contextlib.suppress(Exception):
                 set_accessibility_enabled(dbus_address, False)
 
+    def _unregister_locked(self, proc: subprocess.Popen[bytes]) -> None:
+        """Drop ``proc``'s entry, only if the entry is this very object; caller holds the lock.
+
+        A reaped leader's pid can be reused by a newer child that registered under
+        the same pid; an old ``Popen`` must never remove that newer entry.
+        """
+        if self._processes.get(proc.pid) is proc:
+            del self._processes[proc.pid]
+            self._detachable.discard(proc.pid)
+            self._sweepable.discard(proc.pid)
+
     def _poll_locked(self, proc: subprocess.Popen[bytes]) -> int | None:
         """Report a leader's exit status; must be called under the lock.
 
@@ -498,7 +526,7 @@ class OwnedProcessRegistry:
                 # drop the entry even mid-escalation (the escalation reads the
                 # leaders list, not the registry). Popen.poll returns 0 for a
                 # child it cannot reap, so report the same rather than leak.
-                self._processes.pop(proc.pid, None)
+                self._unregister_locked(proc)
                 return 0
             if info is None:
                 return None
@@ -518,7 +546,7 @@ class OwnedProcessRegistry:
         with self._lock:
             rc = self._poll_locked(proc)
             if rc is not None and proc.pid not in self._escalating:
-                self._processes.pop(proc.pid, None)
+                self._unregister_locked(proc)
             return rc
 
     def wait(self, proc: subprocess.Popen[bytes], timeout: float) -> int:
@@ -535,30 +563,34 @@ class OwnedProcessRegistry:
                 rc = self._poll_locked(proc)
                 if rc is not None:
                     if proc.pid not in self._escalating:
-                        self._processes.pop(proc.pid, None)
+                        self._unregister_locked(proc)
                     return rc
             if time.monotonic() >= deadline:
                 raise subprocess.TimeoutExpired(proc.args, timeout)
             time.sleep(0.05)
 
     def reap_finished(self) -> list[int]:
-        """Reap every registered leader that exited and whose group has no live member left.
+        """Reap every launched app leader that exited and whose group has no live member left.
 
         A leader that exits on its own (a browser launch that hands its URL to
         the running instance, an app the agent closed) stays a zombie child
         until something polls it; in a long-lived session nothing may, so the
         zombies pile up (ryder4proudex/workstation-mcp#3). Reaping is safe once
-        the group has no live member: no killpg can be needed for it any more,
-        and with no member left nobody can join it, so its pgid needs no
-        reservation. A leader whose group still has live members stays
-        registered (and a zombie), so ``terminate_all`` can still signal the
-        group without risking a recycled pgid. Leaders under
-        ``terminate_leaders`` escalation are left to it. Returns the reaped pids.
+        the group has no live member: no killpg is needed for it any more, and
+        an empty group can never gain a member again. A leader whose group
+        still has live members stays registered (and a zombie), so
+        ``terminate_all`` can still signal the group without risking a recycled
+        pgid. Only ``sweepable`` leaders (launched apps) are considered; session
+        wrappers and leaders under ``terminate_leaders`` escalation are left to
+        their owners. The group is scanned twice: a member that forks and exits
+        while one ``/proc`` scan runs can hide its child from that scan, and
+        the child is then visible to the next one (residual: a chain of such
+        fork-and-exit steps spanning both scans). Returns the reaped pids.
         """
         reaped: list[int] = []
         with self._lock:
             for pid, proc in list(self._processes.items()):
-                if pid in self._escalating:
+                if pid not in self._sweepable or pid in self._escalating:
                     continue
                 if proc.returncode is None:
                     try:
@@ -566,11 +598,10 @@ class OwnedProcessRegistry:
                     except ChildProcessError:
                         info = None  # reaped elsewhere: poll() below records it
                     else:
-                        if info is None or _group_alive(pid):
+                        if info is None or _group_alive(pid) or _group_alive(pid):
                             continue
                     proc.poll()
-                del self._processes[pid]
-                self._detachable.discard(pid)
+                self._unregister_locked(proc)
                 reaped.append(pid)
         return reaped
 
@@ -590,7 +621,7 @@ class OwnedProcessRegistry:
                 return
             proc.kill()
             if proc.returncode is not None:
-                self._processes.pop(proc.pid, None)
+                self._unregister_locked(proc)
 
     def reap(self, proc: subprocess.Popen[bytes]) -> None:
         """Reap a registered leader after its group's last signal, unregistering it.
@@ -609,7 +640,7 @@ class OwnedProcessRegistry:
                 if not escalating:
                     rc = proc.poll()
                     if rc is not None:
-                        self._processes.pop(proc.pid, None)
+                        self._unregister_locked(proc)
                         return
             if time.monotonic() >= deadline:
                 return
@@ -624,14 +655,14 @@ class OwnedProcessRegistry:
         """
         with self._lock:
             for leader in leaders:
-                if not _leader_reaped(leader.pid):
+                if _owned(leader):
                     _signal_process_group(leader.pid, sig)
 
     def _kill_owned(self, leaders: list[subprocess.Popen[bytes]]) -> None:
         """SIGKILL every still-owned leader whose group has live members."""
         with self._lock:
             for leader in leaders:
-                if not _leader_reaped(leader.pid) and _group_alive(leader.pid):
+                if _owned(leader) and _group_alive(leader.pid):
                     _signal_process_group(leader.pid, signal.SIGKILL)
 
     def terminate_leaders(self, leaders: list[subprocess.Popen[bytes]], *, reap: bool) -> None:
@@ -663,6 +694,9 @@ class OwnedProcessRegistry:
         accepted).
         """
         with self._lock:
+            # A leader this registry already reaped (its Popen holds the status) is
+            # no longer ours: its pid may name an unrelated group by now.
+            leaders = [leader for leader in leaders if leader.returncode is None]
             for leader in leaders:
                 self._escalating[leader.pid] = self._escalating.get(leader.pid, 0) + 1
         try:
@@ -988,6 +1022,7 @@ class Session:
                 stdout=log_file,
                 stderr=log_file,
                 start_new_session=True,
+                sweepable=True,
             )
 
         app_info = AppInfo(
@@ -1743,6 +1778,7 @@ class LiveSession:
                 stderr=log_file,
                 start_new_session=True,
                 detachable=True,
+                sweepable=True,
             )
 
         app_info = AppInfo(

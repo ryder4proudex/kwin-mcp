@@ -86,6 +86,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
         env: dict[str, str] | None = None,
         start_new_session: bool = False,
         detachable: bool = False,
+        sweepable: bool = False,
     ) -> subprocess.Popen[bytes]:
         if args[0] != "dbus-run-session":
             return real_spawn(
@@ -96,6 +97,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
                 env=env,
                 start_new_session=start_new_session,
                 detachable=detachable,
+                sweepable=sweepable,
             )
         observed.spawn_env.append(dict(env or {}))
         observed.registered_at_spawn.append(list(registry._temp_dirs))
@@ -408,27 +410,39 @@ def _zombie(pid: int) -> bool:
 def test_reap_finished_takes_only_exited_leaders_with_empty_groups() -> None:
     """Leaders that exit on their own are reaped once their group is empty (no zombies pile up)."""
     registry = OwnedProcessRegistry()
-    done = registry.spawn(["true"], start_new_session=True)
+    done = registry.spawn(["true"], start_new_session=True, sweepable=True)
     # Exits at once but leaves a live member in its group: kept, so the group stays signalable.
-    holder = registry.spawn(["sh", "-c", "sleep 30 & exit 0"], start_new_session=True)
-    running = registry.spawn(["sleep", "30"], start_new_session=True)
+    holder = registry.spawn(
+        ["sh", "-c", "sleep 30 & exit 0"], start_new_session=True, sweepable=True
+    )
+    running = registry.spawn(["sleep", "30"], start_new_session=True, sweepable=True)
+    # A session wrapper is never swept: Session.stop signals its group outside the registry.
+    wrapper = registry.spawn(["true"], start_new_session=True)
     try:
         deadline = time.monotonic() + 10
-        while not (_zombie(done.pid) and _zombie(holder.pid)):
+        while not (_zombie(done.pid) and _zombie(holder.pid) and _zombie(wrapper.pid)):
             assert time.monotonic() < deadline, "leaders did not exit"
             time.sleep(0.05)
         assert registry.reap_finished() == [done.pid]
         assert done.returncode == 0
         assert not _zombie(done.pid)
-        assert set(registry._processes) == {holder.pid, running.pid}
+        assert set(registry._processes) == {holder.pid, running.pid, wrapper.pid}
         assert _zombie(holder.pid)
         os.killpg(holder.pid, signal.SIGKILL)
         while registry.reap_finished() != [holder.pid]:
             assert time.monotonic() < deadline + 10, "emptied group was not reaped"
             time.sleep(0.05)
         assert holder.returncode == 0
-        assert set(registry._processes) == {running.pid}
+        assert set(registry._processes) == {running.pid, wrapper.pid}
+        # An old Popen whose pid now names a newer entry neither unregisters nor signals it.
+        registry._processes[done.pid] = running
+        registry.poll(done)
+        registry.terminate_leaders([done], reap=False)
+        assert registry._processes[done.pid] is running
+        del registry._processes[done.pid]
+        assert running.poll() is None
     finally:
         registry.close()
         registry.terminate_all()
         running.wait(5)
+        wrapper.wait(5)
