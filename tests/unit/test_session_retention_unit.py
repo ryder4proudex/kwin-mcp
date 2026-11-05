@@ -10,10 +10,13 @@ fresh ``OwnedProcessRegistry`` replaces the module's, so the registered dirs
 
 from __future__ import annotations
 
+import os
+import signal
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
 import pytest
@@ -24,7 +27,6 @@ from kwin_mcp.session import LiveSession, OwnedProcessRegistry, Session, Session
 
 if TYPE_CHECKING:
     import subprocess
-    from pathlib import Path
 
     from kwin_mcp.models import AppEntry, HomeMode
 
@@ -394,3 +396,39 @@ def test_detaching_sweep_spares_only_live_desktop_apps(harness: _Harness) -> Non
     finally:
         live_app.kill()
         live_app.wait()
+
+
+def _zombie(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z"
+    except OSError:
+        return False
+
+
+def test_reap_finished_takes_only_exited_leaders_with_empty_groups() -> None:
+    """Leaders that exit on their own are reaped once their group is empty (no zombies pile up)."""
+    registry = OwnedProcessRegistry()
+    done = registry.spawn(["true"], start_new_session=True)
+    # Exits at once but leaves a live member in its group: kept, so the group stays signalable.
+    holder = registry.spawn(["sh", "-c", "sleep 30 & exit 0"], start_new_session=True)
+    running = registry.spawn(["sleep", "30"], start_new_session=True)
+    try:
+        deadline = time.monotonic() + 10
+        while not (_zombie(done.pid) and _zombie(holder.pid)):
+            assert time.monotonic() < deadline, "leaders did not exit"
+            time.sleep(0.05)
+        assert registry.reap_finished() == [done.pid]
+        assert done.returncode == 0
+        assert not _zombie(done.pid)
+        assert set(registry._processes) == {holder.pid, running.pid}
+        assert _zombie(holder.pid)
+        os.killpg(holder.pid, signal.SIGKILL)
+        while registry.reap_finished() != [holder.pid]:
+            assert time.monotonic() < deadline + 10, "emptied group was not reaped"
+            time.sleep(0.05)
+        assert holder.returncode == 0
+        assert set(registry._processes) == {running.pid}
+    finally:
+        registry.close()
+        registry.terminate_all()
+        running.wait(5)

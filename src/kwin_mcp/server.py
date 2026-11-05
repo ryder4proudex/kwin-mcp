@@ -1971,6 +1971,24 @@ def _signal_watcher() -> NoReturn:
     _finish(128 + _signal_signum)
 
 
+_REAP_INTERVAL_SECONDS = 5.0
+
+
+def _leader_reaper(interval: float = _REAP_INTERVAL_SECONDS) -> NoReturn:
+    """Reap launched apps that exited on their own, so no zombie outlives them by long.
+
+    A long-lived session (the workstation-mcp agent desktop runs for days) may
+    never poll its apps, and every leader that exits by itself — a browser
+    launch that hands its URL to the running instance — would otherwise stay a
+    zombie until ``session_stop``. ``reap_finished`` only takes leaders whose
+    group has no live member left, under the registry lock.
+    """
+    while True:
+        time.sleep(interval)
+        with contextlib.suppress(Exception):
+            process_registry.reap_finished()
+
+
 def _idle_watcher(limit: int) -> NoReturn:
     """Exit via the shared finish routine once no request came for ``limit`` seconds.
 
@@ -2127,6 +2145,7 @@ def main() -> None:
         signal.signal(signum, _shutdown_handler)
     # Daemon: a still-pending wait must not keep the process alive on the EOF path.
     threading.Thread(target=_signal_watcher, name="kwin-mcp-shutdown", daemon=True).start()
+    threading.Thread(target=_leader_reaper, name="kwin-mcp-reaper", daemon=True).start()
     if server.flags.idle_exit:
         threading.Thread(
             target=_idle_watcher,

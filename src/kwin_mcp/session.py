@@ -541,6 +541,39 @@ class OwnedProcessRegistry:
                 raise subprocess.TimeoutExpired(proc.args, timeout)
             time.sleep(0.05)
 
+    def reap_finished(self) -> list[int]:
+        """Reap every registered leader that exited and whose group has no live member left.
+
+        A leader that exits on its own (a browser launch that hands its URL to
+        the running instance, an app the agent closed) stays a zombie child
+        until something polls it; in a long-lived session nothing may, so the
+        zombies pile up (ryder4proudex/workstation-mcp#3). Reaping is safe once
+        the group has no live member: no killpg can be needed for it any more,
+        and with no member left nobody can join it, so its pgid needs no
+        reservation. A leader whose group still has live members stays
+        registered (and a zombie), so ``terminate_all`` can still signal the
+        group without risking a recycled pgid. Leaders under
+        ``terminate_leaders`` escalation are left to it. Returns the reaped pids.
+        """
+        reaped: list[int] = []
+        with self._lock:
+            for pid, proc in list(self._processes.items()):
+                if pid in self._escalating:
+                    continue
+                if proc.returncode is None:
+                    try:
+                        info = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    except ChildProcessError:
+                        info = None  # reaped elsewhere: poll() below records it
+                    else:
+                        if info is None or _group_alive(pid):
+                            continue
+                    proc.poll()
+                del self._processes[pid]
+                self._detachable.discard(pid)
+                reaped.append(pid)
+        return reaped
+
     def kill(self, proc: subprocess.Popen[bytes]) -> None:
         """Send SIGKILL to a registered leader.
 
