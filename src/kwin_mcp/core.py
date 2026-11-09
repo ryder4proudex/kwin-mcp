@@ -538,36 +538,19 @@ class AutomationEngine:
         return env
 
     def _a11y_bus_address(self, env: dict[str, str]) -> str:
-        """Identity of the session's AT-SPI bus; ``""`` when it cannot be read.
+        """Identity of the session's reachable AT-SPI bus; fail before native init.
 
         Apps and the worker reach the accessibility bus through
         ``AT_SPI_BUS_ADDRESS`` when it is set, else through
         ``org.a11y.Bus.GetAddress`` on the session bus. The reply embeds the
-        bus's guid, so it changes when the a11y bus restarts even though its
-        socket path stays the same. A worker that bound the old identity keeps
+        bus's guid (probed explicitly if absent), so identity changes when its
+        socket path stays the same after a restart. A worker bound to the old identity keeps
         answering with no applications from its dead connection forever, so
         this is probed on every call.
         """
-        explicit = env.get("AT_SPI_BUS_ADDRESS", "")
-        if explicit:
-            return explicit
-        session_bus = env.get("DBUS_SESSION_BUS_ADDRESS", "")
-        if not session_bus:
-            return ""
-        try:
-            import dbus.bus
+        from kwin_mcp.atspi_bus import checked_address
 
-            conn = dbus.bus.BusConnection(session_bus)
-            try:
-                return str(
-                    conn.get_object("org.a11y.Bus", "/org/a11y/bus").GetAddress(
-                        dbus_interface="org.a11y.Bus"
-                    )
-                )
-            finally:
-                conn.close()
-        except Exception:
-            return ""
+        return checked_address(env)
 
     def _ensure_atspi_worker(self) -> subprocess.Popen[bytes]:
         """Return the AT-SPI worker for the current session bus, (re)spawning it if needed.
@@ -586,6 +569,7 @@ class AutomationEngine:
         env = self._session_env()
         bus = env.get("DBUS_SESSION_BUS_ADDRESS", "")
         a11y = self._a11y_bus_address(env)
+        env["AT_SPI_BUS_ADDRESS"] = a11y
         proc = self._atspi_proc
         if proc is not None and (
             process_registry.poll(proc) is not None
