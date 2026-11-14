@@ -6,7 +6,9 @@ calls these methods directly; the MCP server wraps them.
 """
 
 import contextlib
+import itertools
 import json
+import math
 import os
 import re
 import selectors
@@ -804,22 +806,30 @@ class AutomationEngine:
         inp: InputBackend,
         device: Literal["pointer", "touch"],
         points: Iterable[tuple[float, float, UIElement | None]],
+        paths: Iterable[Sequence[tuple[float, float]]] = (),
     ) -> None:
         """Refuse a gesture that would visit a point outside every screen.
 
         libei drops absolute motion and touch points outside the EIS device's
         regions without an error, so a click there would land wherever the
-        pointer already was. ``points`` are every point the gesture visits, each
-        with the element it aims at (None for a plain point); nothing is checked
-        when the device reports no regions.
+        pointer already was. ``points`` are the points the gesture aims at, each
+        with its element (None for a plain point). ``paths`` are the polylines
+        the gesture interpolates along (drags, swipes, pinches); every pixel
+        step of them must be on a screen too, so a straight path across a gap
+        between screens is refused. Nothing is checked when the device reports
+        no regions.
         """
         regions = inp.screen_regions(device)
         if not regions:
             return
+
+        def on_screen(x: float, y: float) -> bool:
+            return any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in regions)
+
+        screens = ", ".join(f"{rw}x{rh}+{rx}+{ry}" for rx, ry, rw, rh in regions)
         for x, y, element in points:
-            if any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in regions):
+            if on_screen(x, y):
                 continue
-            screens = ", ".join(f"{rw}x{rh}+{rx}+{ry}" for rx, ry, rw, rh in regions)
             where = f"({x:g}, {y:g})"
             if element is not None:
                 msg = (
@@ -834,6 +844,20 @@ class AutomationEngine:
                 "dropped.\nPass a point inside a screen."
             )
             raise ValueError(msg)
+        for path in paths:
+            for (ax, ay), (bx, by) in itertools.pairwise(path):
+                steps = math.ceil(max(abs(bx - ax), abs(by - ay)))
+                for step in range(steps + 1):
+                    x = ax + (bx - ax) * step / max(steps, 1)
+                    y = ay + (by - ay) * step / max(steps, 1)
+                    if on_screen(x, y):
+                        continue
+                    msg = (
+                        f"The path from ({ax:g}, {ay:g}) to ({bx:g}, {by:g}) leaves every "
+                        f"screen at ({x:.0f}, {y:.0f}) ({screens}); input there would be "
+                        "dropped.\nChoose points whose straight path stays on screen."
+                    )
+                    raise ValueError(msg)
 
     def _capture(self, capture: Capture | None) -> tuple[list[Frame], list[str]]:
         """Frames ``capture`` asks for, taken after the action committed.
@@ -2011,6 +2035,7 @@ class AutomationEngine:
                 *((w.x, w.y, None) for w in waypoints or ()),
                 (end.x, end.y, element),
             ],
+            [[(start.x, start.y), *((w.x, w.y) for w in waypoints or ()), (end.x, end.y)]],
         )
         inp.check_not_held("pointer_drag", buttons=[btn], keycodes=modifier_codes)
         moved = inp.moved_while_held(btn)
@@ -2191,6 +2216,7 @@ class AutomationEngine:
                 *((start.x, start.y + dy, start_element if not dy else None) for dy in offsets),
                 *((end.x, end.y + dy, element if not dy else None) for dy in offsets),
             ],
+            [[(start.x, start.y + dy), (end.x, end.y + dy)] for dy in offsets],
         )
         if fingers == 1:
             inp.touch_swipe(start.x, start.y, end.x, end.y, duration_ms=duration_ms)
@@ -2231,6 +2257,13 @@ class AutomationEngine:
                     for distance in (start_distance, end_distance)
                     for side in (-1, 1)
                 ),
+            ],
+            [
+                [
+                    (point.x + side * start_distance / 2, point.y),
+                    (point.x + side * end_distance / 2, point.y),
+                ]
+                for side in (-1, 1)
             ],
         )
         inp.touch_pinch(point.x, point.y, start_distance, end_distance, duration_ms=duration_ms)

@@ -162,3 +162,55 @@ def test_device_without_regions_is_not_checked(fake_engine: FakeEngine) -> None:
     fake_engine.engine.pointer_move(target=Point(x=561, y=2949))
 
     assert fake_engine.eis.of_kind("motion")[-1].args == (561, 2949)
+
+
+# Two screens with a 100 px gap between them.
+GAPPED = [(0, 0, 100, 100), (200, 0, 100, 100)]
+GAPPED_SCREENS = "100x100+0+0, 100x100+200+0"
+
+
+@pytest.mark.qa("QA-INP-073")
+@pytest.mark.parametrize(
+    ("tool", "kwargs"),
+    [
+        ("pointer_drag", {"from_": Point(x=50, y=50), "to": Point(x=250, y=50)}),
+        (
+            "pointer_drag",
+            {
+                "from_": Point(x=50, y=50),
+                "to": Point(x=60, y=50),
+                "waypoints": [Waypoint(x=250, y=50)],
+            },
+        ),
+        ("touch_swipe", {"from_": Point(x=50, y=50), "to": Point(x=250, y=50)}),
+        (
+            "touch_swipe",
+            {"from_": Point(x=50, y=50), "to": Point(x=250, y=50), "fingers": 2},
+        ),
+    ],
+)
+def test_a_path_crossing_the_gap_between_screens_is_refused(
+    fake_engine: FakeEngine, tool: str, kwargs: dict[str, object]
+) -> None:
+    fake_engine.eis.regions = list(GAPPED)
+
+    with pytest.raises(ValueError) as excinfo:
+        getattr(fake_engine.engine, tool)(**kwargs)
+
+    first, remedy = str(excinfo.value).split("\n")
+    assert re.fullmatch(
+        r"The path from \(\d+, \d+\) to \(250, \d+\) leaves every screen at \(100, \d+\) "
+        + re.escape(f"({GAPPED_SCREENS}); input there would be dropped."),
+        first,
+    ), first
+    assert remedy == "Choose points whose straight path stays on screen."
+    assert fake_engine.eis.events == []
+
+
+@pytest.mark.qa("QA-INP-073")
+def test_a_path_within_the_screens_is_accepted(fake_engine: FakeEngine) -> None:
+    fake_engine.eis.regions = list(REGIONS)
+
+    fake_engine.engine.pointer_drag(from_=Point(x=1900, y=500), to=Point(x=2500, y=500))
+
+    assert fake_engine.eis.of_kind("motion")[-1].args == (2500, 500)
