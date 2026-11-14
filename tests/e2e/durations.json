@@ -2,6 +2,7 @@
   "tests/e2e/test_a11y_text_formats.py": 12.0,
   "tests/e2e/test_app_launch_log.py": 5.0,
   "tests/e2e/test_atspi_exec_security.py": 35.0,
+  "tests/e2e/test_atspi_runtime_isolation.py": 15.0,
   "tests/e2e/test_atspi_service_acquisition.py": 35.0,
   "tests/e2e/test_atspi_worker.py": 88.4,
   "tests/e2e/test_capture.py": 86.9,

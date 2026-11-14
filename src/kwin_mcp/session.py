@@ -57,6 +57,36 @@ _A11Y_STATUS_INTERFACE = "org.a11y.Status"
 _A11Y_CALL_TIMEOUT_S = 5.0
 _KWIN_BUS_NAME_TIMEOUT = 30
 ATSPI_DIRECT_START_ENV = "KWIN_MCP_ATSPI_DIRECT_START"
+# at-spi-bus-launcher binds its socket at $XDG_RUNTIME_DIR/at-spi/bus$DISPLAY
+# (":" becomes "_") after unlinking whatever is already there, and falls back
+# to another address when that path is 100 bytes or longer (at-spi2-core
+# bus/at-spi-bus-launcher.c). Each virtual session therefore gives its launcher
+# a private runtime dir short enough for that path.
+_ATSPI_RUNTIME_PREFIX = "kwin-mcp-a11y-"
+_ATSPI_SOCKET_SUFFIX = "/at-spi/bus"
+_ATSPI_SOCKET_PATH_LIMIT = 100
+
+
+def _make_atspi_runtime_dir(runtime_dir: str) -> Path:
+    """Create the private runtime dir (0700) for one session's accessibility launcher.
+
+    It lives in the user's runtime dir when that path is short enough, otherwise
+    in the temp dir. Sharing the host runtime dir instead lets the launcher
+    replace the socket of another bus with the same name (issue #6).
+    """
+    for parent in (runtime_dir, None):
+        try:
+            path = Path(tempfile.mkdtemp(prefix=_ATSPI_RUNTIME_PREFIX, dir=parent))
+        except OSError:
+            continue
+        if len(os.fsencode(path)) + len(_ATSPI_SOCKET_SUFFIX) < _ATSPI_SOCKET_PATH_LIMIT:
+            return path
+        path.rmdir()
+    msg = (
+        "Cannot create a private accessibility runtime dir short enough for its "
+        "socket path; set TMPDIR or XDG_RUNTIME_DIR to a shorter existing directory"
+    )
+    raise RuntimeError(msg)
 
 
 class SessionType(Enum):
@@ -778,6 +808,8 @@ class Session:
         # stop() after the diagnostics it holds were consumed.
         self._stderr_file: IO[bytes] | None = None
         self._session_config_dir: Path | None = None
+        # Private XDG_RUNTIME_DIR of this session's accessibility launcher.
+        self._atspi_runtime_dir: Path | None = None
 
     @property
     def is_running(self) -> bool:
@@ -863,6 +895,12 @@ class Session:
             self._session_config_dir = Path(tempfile.mkdtemp(prefix="kwin-mcp-config-"))
             _write_deterministic_session_config(self._session_config_dir)
             process_registry.register_temp_dir(self._session_config_dir)
+        try:
+            self._atspi_runtime_dir = _make_atspi_runtime_dir(runtime_dir)
+        except BaseException:
+            self._cleanup_start_dirs()
+            raise
+        process_registry.register_temp_dir(self._atspi_runtime_dir)
         # Deliberately NOT isolating XDG_DATA_HOME / XDG_CACHE_HOME: qtbase
         # crash-logs a fatal qFatal when a nonexistent standard data dir is
         # set (reproduced on qt6-base 6.10), and existing dirs already
@@ -1123,11 +1161,8 @@ class Session:
             path = Path(runtime_dir) / f"{self._socket_name}{suffix}"
             path.unlink(missing_ok=True)
 
-        # Remove the per-session config dir
-        if self._session_config_dir is not None:
-            shutil.rmtree(self._session_config_dir, ignore_errors=True)
-            process_registry.unregister_temp_dir(self._session_config_dir)
-            self._session_config_dir = None
+        # Remove the per-session config dir and the launcher's runtime dir
+        self._remove_private_dirs()
 
         # Unregister the temp dirs this stop removed, so the registry stays
         # accurate across start/stop cycles and the server's exit path never
@@ -1156,10 +1191,7 @@ class Session:
         cannot run; the home follows retention.home as in stop(). The screenshot dir
         is created only after KWin starts, so it does not exist yet here.
         """
-        if self._session_config_dir is not None:
-            shutil.rmtree(self._session_config_dir, ignore_errors=True)
-            process_registry.unregister_temp_dir(self._session_config_dir)
-            self._session_config_dir = None
+        self._remove_private_dirs()
         if self._home_dir is None:
             return
         if self._config is None or not self._config.retention.home:
@@ -1167,6 +1199,19 @@ class Session:
                 _remove_tree(self._home_dir)
                 process_registry.unregister_temp_dir(self._home_dir)
         self._home_dir = None
+
+    def _remove_private_dirs(self) -> None:
+        """Remove the session-private config and accessibility runtime dirs.
+
+        No retention applies to them: they hold only generated config and the
+        launcher's socket, which is dead once the session bus is gone.
+        """
+        for path in (self._session_config_dir, self._atspi_runtime_dir):
+            if path is not None:
+                shutil.rmtree(path, ignore_errors=True)
+                process_registry.unregister_temp_dir(path)
+        self._session_config_dir = None
+        self._atspi_runtime_dir = None
 
     def _signal_process_group(self, sig: int) -> None:
         """Signal the whole session process group, ignoring races."""
@@ -1297,6 +1342,10 @@ class Session:
             if direct_start
             else f"; set {ATSPI_DIRECT_START_ENV}=1 to start it directly from its service files"
         )
+        if self._atspi_runtime_dir is None:
+            msg = "the accessibility runtime dir must exist before the wrapper script is built"
+            raise RuntimeError(msg)
+        atspi_runtime_dir = shlex.quote(str(self._atspi_runtime_dir))
         return f"""\
 # Keep every background child in the registered group, even with inherited monitor mode.
 set +m
@@ -1397,7 +1446,8 @@ atspi_wait_for_name() {{
 atspi_start_directly() {{
     local address launcher_pid registry_pid
     [ "${{#ATSPI_HELPER[@]}}" -gt 0 ] || return 1
-    "${{ATSPI_HELPER[@]}}" "${{ATSPI_LAUNCHER_SERVICE[@]}}" >/dev/null &
+    XDG_RUNTIME_DIR="$ATSPI_RUNTIME_DIR" \\
+        "${{ATSPI_HELPER[@]}}" "${{ATSPI_LAUNCHER_SERVICE[@]}}" >/dev/null &
     launcher_pid=$!
     if atspi_wait_for_name --session org.a11y.Bus "$launcher_pid" \\
         && address=$(dbus-send --session --print-reply=literal --reply-timeout=5000 \\
@@ -1416,6 +1466,20 @@ atspi_start_directly() {{
     atspi_stop ATSPI_LAUNCHER_SERVICE "$launcher_pid"
     return 1
 }}
+# The launcher binds $XDG_RUNTIME_DIR/at-spi/bus$DISPLAY and first unlinks
+# whatever is there. In the shared runtime dir that replaces the socket of any
+# other bus of the same name: the host desktop's bus_0 under DISPLAY=:0, or every
+# other virtual session's bus without DISPLAY. Their clients then reach this
+# session's bus, and once it exits, a dead path on which libatspi aborts
+# (issue #6). The launcher therefore gets a private runtime dir, for its spawn
+# only: services activated later (portals) need the real one for the Wayland
+# socket, so it is restored once the accessibility bus is up.
+ATSPI_RUNTIME_DIR={atspi_runtime_dir}
+HOST_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-}}
+if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$ATSPI_RUNTIME_DIR"; then
+    echo "WARN: could not give the AT-SPI bus launcher a private runtime dir;" \\
+        "it may replace another session's accessibility bus socket"
+fi
 ATSPI_UP=1
 if ! ATSPI_ERR=$(dbus-send --session --print-reply --reply-timeout=10000 \\
     --dest=org.a11y.Bus /org/a11y/bus \\
@@ -1441,6 +1505,22 @@ if [ "$ATSPI_UP" = 1 ] && ! ATSPI_ERR=$(dbus-send --session --print-reply --repl
     ATSPI_ERR=${{ATSPI_ERR%%$'\\n'*}}
     echo "WARN: AT-SPI accessibility could not be switched on, apps that check it" \\
         "(such as Firefox) may expose no accessibility tree: ${{ATSPI_ERR:-unknown error}}"
+fi
+if [ "$ATSPI_UP" = 1 ] && [ -n "$HOST_RUNTIME_DIR" ]; then
+    ATSPI_ADDRESS=$(dbus-send --session --print-reply=literal --reply-timeout=10000 \\
+        --dest=org.a11y.Bus /org/a11y/bus org.a11y.Bus.GetAddress 2>/dev/null)
+    case "$(echo $ATSPI_ADDRESS)" in
+        "unix:path=$HOST_RUNTIME_DIR/at-spi/"*)
+            echo "WARN: this session's AT-SPI bus socket is in the shared" \\
+                "$HOST_RUNTIME_DIR/at-spi directory and may have replaced another" \\
+                "session's accessibility bus socket"
+            ;;
+    esac
+fi
+if [ -n "$HOST_RUNTIME_DIR" ] \\
+    && ! dbus-update-activation-environment XDG_RUNTIME_DIR="$HOST_RUNTIME_DIR"; then
+    echo "WARN: could not restore XDG_RUNTIME_DIR for D-Bus activated services;" \\
+        "portals may not find the session's Wayland socket"
 fi
 
 # Pre-set D-Bus activation environment BEFORE starting KWin.
@@ -1544,6 +1624,11 @@ wait $KWIN_PID
             # Allow clients to bind restricted Wayland protocols (e.g. plasma_window_management).
             # Safe in isolated virtual sessions where there is no user desktop to protect.
             "KWIN_WAYLAND_NO_PERMISSION_CHECKS": "1",
+            # The AT-SPI launcher activates gvfsd while it runs under its private
+            # runtime dir (see the wrapper script), where gvfsd would mount a
+            # FUSE file system that a killed session can leave stale. In the
+            # host runtime dir the mount point is the host's, already in use.
+            "GVFS_DISABLE_FUSE": "1",
         }
         # Remove host display references to avoid kwin connecting to host
         env.pop("WAYLAND_DISPLAY", None)

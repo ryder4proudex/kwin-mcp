@@ -54,6 +54,7 @@ class _Harness:
     temp_root: Path
     runtime_dir: Path
     spawn_env: list[dict[str, str]] = field(default_factory=list)
+    spawn_scripts: list[str] = field(default_factory=list)
     registered_at_spawn: list[list[Path]] = field(default_factory=list)
     fail_spawn: bool = False
 
@@ -62,6 +63,10 @@ class _Harness:
 
     def temp_dirs(self, prefix: str) -> list[Path]:
         return sorted(self.temp_root.glob(f"{prefix}*"))
+
+    def atspi_dirs(self) -> list[Path]:
+        """The accessibility launcher's private runtime dirs (in the runtime dir)."""
+        return sorted(self.runtime_dir.glob("kwin-mcp-a11y-*"))
 
 
 @pytest.fixture
@@ -100,6 +105,7 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
                 sweepable=sweepable,
             )
         observed.spawn_env.append(dict(env or {}))
+        observed.spawn_scripts.append(args[-1])
         observed.registered_at_spawn.append(list(registry._temp_dirs))
         if observed.fail_spawn:
             msg = "dbus-run-session: not found"
@@ -147,6 +153,9 @@ def test_stop_keeps_exactly_the_retained_dirs(
     assert (home_dir is not None) == (home == "isolated")
     config_dirs = harness.temp_dirs("kwin-mcp-config-")
     assert len(config_dirs) == (1 if home == "host" else 0)
+    atspi_dirs = harness.atspi_dirs()
+    assert len(atspi_dirs) == 1
+    config_dirs += atspi_dirs
     # Decided at start: the exit path's registry holds exactly what stop removes.
     assert harness.registered() == _expected_registered(
         home_dir, screenshot_dir, config_dirs, retention
@@ -181,7 +190,7 @@ def test_exit_path_keeps_the_same_dirs_as_stop(
     leader = session._process
     assert leader is not None
     screenshot_dir, home_dir = info.screenshot_dir, info.home_dir
-    config_dirs = harness.temp_dirs("kwin-mcp-config-")
+    config_dirs = harness.temp_dirs("kwin-mcp-config-") + harness.atspi_dirs()
 
     # The server exit path (stdin EOF or SIGTERM while a tool is busy) cannot
     # run session_stop: it closes the registry and sweeps what is registered.
@@ -216,7 +225,7 @@ def test_host_home_gets_a_private_config_dir_with_kwalletrc(
         assert env["HOME"] == "/home/host-user"
         assert env["XDG_CONFIG_HOME"] == str(config_dir)
         assert "Enabled=false" in (config_dir / "kwalletrc").read_text()
-        assert harness.registered_at_spawn == [[config_dir]]
+        assert harness.registered_at_spawn == [[config_dir, *harness.atspi_dirs()]]
     finally:
         session.stop()
     assert not config_dir.exists()
@@ -238,7 +247,7 @@ def test_isolated_home_has_xdg_dirs_and_kwalletrc(harness: _Harness) -> None:
         assert env["HOME"] == str(home_dir)
         assert env["XDG_CONFIG_HOME"] == str(home_dir / ".config")
         assert harness.temp_dirs("kwin-mcp-config-") == []
-        assert harness.registered_at_spawn == [[home_dir]]
+        assert harness.registered_at_spawn == [[home_dir, *harness.atspi_dirs()]]
     finally:
         session.stop()
     assert not home_dir.exists()
