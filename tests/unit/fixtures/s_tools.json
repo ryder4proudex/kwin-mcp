@@ -849,6 +849,12 @@
      "required": false,
      "default": null,
      "description": null
+    },
+    {
+     "name": "echo",
+     "required": false,
+     "default": false,
+     "description": "Repeat the text in the result (default: only its length)."
     }
    ],
    "output": [

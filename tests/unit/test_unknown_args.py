@@ -223,7 +223,7 @@ def test_remedy_table_and_difflib(spied: tuple[KwinServer, _Spy]) -> None:
             "keyboard_type",
             {"text": "a", "unicode": True},
             "Unknown argument 'unicode' for keyboard_type.\n"
-            "Valid arguments: text, method, capture.",
+            "Valid arguments: text, method, capture, echo.",
         ),
         (
             "pointer_click",

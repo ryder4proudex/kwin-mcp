@@ -208,7 +208,7 @@ def _typing(engine: AutomationEngine, text: str) -> Generator[Future[KeyboardTyp
 
 def _type_unicode(engine: AutomationEngine, text: str) -> None:
     """Type through the clipboard route and check the reported result."""
-    result = engine.keyboard_type(text, method="unicode")
+    result = engine.keyboard_type(text, method="unicode", echo=True)
     _assert_pasted(result, text)
 
 

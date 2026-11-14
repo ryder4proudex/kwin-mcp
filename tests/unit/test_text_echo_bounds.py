@@ -1,8 +1,10 @@
-"""Bounded echo of caller text in keyboard_type results (F96).
+"""Echo of caller text in keyboard_type results (F96).
 
 The engine runs over the recording fake EIS client, and the unicode route is
-replaced by a stub that reports success, so only the result is observed: text
-up to 200 characters is echoed as its repr, longer text as its length only.
+replaced by a stub that reports success, so only the result is observed. The
+text is echoed only with ``echo=True`` (typed text can be a password): up to
+200 characters as its repr, longer text as its length only. Without it the
+result reports the length alone.
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ def test_text_at_the_limit_is_echoed_verbatim(
     typed = _typed_through(monkeypatch, fake_engine)
     text = char * 200
 
-    result = fake_engine.engine.keyboard_type(text, method=method)
+    result = fake_engine.engine.keyboard_type(text, method=method, echo=True)
 
     assert result.echo == repr(text)
     assert result.chars == 200
@@ -77,12 +79,62 @@ def test_text_beyond_the_limit_is_echoed_as_its_length(
     typed = _typed_through(monkeypatch, fake_engine)
     text = char * 201
 
-    result = fake_engine.engine.keyboard_type(text, method=method)
+    result = fake_engine.engine.keyboard_type(text, method=method, echo=True)
 
     assert result.echo == "<201 characters>"
     assert result.chars == 201
     assert result.render().splitlines()[0] == f"{prefix}<201 characters>"
     assert typed == [text]
+
+
+@pytest.mark.parametrize(
+    ("method", "char", "first_line"),
+    [
+        ("keys", "a", "Typed: 12 characters (not echoed)."),
+        ("unicode", "é", "Typed unicode: 12 characters (not echoed)."),
+    ],
+)
+def test_text_is_not_echoed_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_engine: FakeEngine,
+    method: TypeMethod,
+    char: str,
+    first_line: str,
+) -> None:
+    typed = _typed_through(monkeypatch, fake_engine)
+    secret = char * 12
+
+    result = fake_engine.engine.keyboard_type(secret, method=method)
+
+    assert result.echo is None
+    assert result.chars == 12
+    text = result.render()
+    assert text.splitlines()[0] == first_line
+    assert secret not in text
+    assert secret not in result.model_dump_json()
+    assert typed == [secret]
+
+
+def test_one_character_is_singular(
+    monkeypatch: pytest.MonkeyPatch, fake_engine: FakeEngine
+) -> None:
+    _typed_through(monkeypatch, fake_engine)
+    assert fake_engine.engine.keyboard_type("x").render().splitlines()[0] == (
+        "Typed: 1 character (not echoed)."
+    )
+
+
+def test_failed_unicode_typing_does_not_echo_the_text(
+    monkeypatch: pytest.MonkeyPatch, fake_engine: FakeEngine
+) -> None:
+    _typed_through(monkeypatch, fake_engine)
+    monkeypatch.setattr(InputBackend, "keyboard_type_unicode", lambda *_a, **_k: None)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        fake_engine.engine.keyboard_type("hunter2-secret", method="unicode")
+
+    assert "hunter2" not in str(excinfo.value)
+    assert str(excinfo.value).startswith("Failed to type unicode text (14 characters)")
 
 
 def test_keyboard_type_rejects_unsupported_characters_without_a_session() -> None:

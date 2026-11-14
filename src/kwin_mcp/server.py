@@ -1147,9 +1147,12 @@ def keyboard_type(
         ),
     ] = "keys",
     capture: Capture | None = None,
+    echo: Annotated[
+        bool, Field(description="Repeat the text in the result (default: only its length).")
+    ] = False,
 ) -> KeyboardTypeResult:
     """Insert text at the keyboard focus. keys = per-key US-QWERTY events (rejects other characters before sending anything); unicode = wtype, else a private clipboard paste that restores the previous selection."""  # noqa: E501
-    return engine.keyboard_type(text=text, method=method, capture=capture)
+    return engine.keyboard_type(text=text, method=method, capture=capture, echo=echo)
 
 
 @_tool(title="Hold or release keys", annotations=_DI, gate=require_input)

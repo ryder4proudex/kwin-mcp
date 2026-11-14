@@ -573,14 +573,14 @@ async def test_echo_and_size_fragments_in_text() -> None:
             try:
                 for text in ("hi", "b" * 200, 'say "hi"\nnow'):
                     typed, typed_text = await client.call_structured(
-                        "keyboard_type", {"text": text}
+                        "keyboard_type", {"text": text, "echo": True}
                     )
                     assert typed["echo"] == repr(text), typed
                     assert typed["chars"] == len(text), typed
                     assert typed_text.split("\n")[0] == f"Typed: {text!r}", typed_text
                 long_text = "a" * 201
                 typed, typed_text = await client.call_structured(
-                    "keyboard_type", {"text": long_text}
+                    "keyboard_type", {"text": long_text, "echo": True}
                 )
                 assert typed["echo"] == "<201 characters>", typed
                 assert typed_text.split("\n")[0] == "Typed: <201 characters>", typed_text

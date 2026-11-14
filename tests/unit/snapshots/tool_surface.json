@@ -5895,6 +5895,11 @@
       "delays_ms"
      ],
      "type": "object"
+    },
+    "echo": {
+     "default": false,
+     "description": "Repeat the text in the result (default: only its length).",
+     "type": "boolean"
     }
    },
    "required": [
@@ -6178,14 +6183,21 @@
      "type": "integer"
     },
     "echo": {
-     "type": "string"
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     }
    },
    "required": [
     "method",
     "route",
-    "chars",
-    "echo"
+    "chars"
    ],
    "type": "object",
    "$defs": {

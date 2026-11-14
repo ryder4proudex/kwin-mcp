@@ -86,7 +86,7 @@ def test_konsole_paste_uses_ctrl_shift_v(
     """Konsole gets the text through Ctrl+Shift+V, and the next key arrives unaltered."""
     received, _ = _start_konsole_cat(engine, start_session, launch, wait_for_app, tmp_path)
 
-    result = engine.keyboard_type(TEXT, method="unicode")
+    result = engine.keyboard_type(TEXT, method="unicode", echo=True)
     assert result.route == "paste:ctrl+shift+v", result.render()
     assert result.chars == len(TEXT)
     assert result.render() == (

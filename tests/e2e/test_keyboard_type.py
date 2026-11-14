@@ -138,7 +138,7 @@ def _type(
     probe: Probe, text: str, method: TypeMethod = "keys"
 ) -> tuple[KeyboardTypeResult, list[dict[str, object]]]:
     mark = probe.mark()
-    result = probe.engine.keyboard_type(text, method=method)
+    result = probe.engine.keyboard_type(text, method=method, echo=True)
     return result, of_kind(probe.settle(since=mark), *KEY_KINDS)
 
 
@@ -150,11 +150,14 @@ def _assert_rejected(probe: Probe, text: str, method: TypeMethod, message: str) 
     assert probe.settle(since=mark) == [], (text, method)
 
 
-def _assert_type_failed(probe: Probe, text: str, echo: str) -> list[dict[str, object]]:
+def _assert_type_failed(probe: Probe, text: str) -> list[dict[str, object]]:
     mark = probe.mark()
     with pytest.raises(RuntimeError) as excinfo:
         probe.engine.keyboard_type(text, method="unicode")
-    assert str(excinfo.value) == f"Failed to type unicode: {echo}"
+    # The text is never quoted, only counted.
+    assert str(excinfo.value).splitlines()[0] == (
+        f"Failed to type unicode text ({len(text)} characters)."
+    )
     return probe.settle(since=mark)
 
 
@@ -348,7 +351,7 @@ def test_nul_and_1mib(engine: AutomationEngine, tmp_path: Path) -> None:
 
     # Over the 1 MiB cap: refused before any event, selection untouched.
     for text in ("é" * (1 << 20), "가" * 350_000):
-        events = _assert_type_failed(probe, text, f"<{len(text)} characters>")
+        events = _assert_type_failed(probe, text)
         assert events == []
         assert _selection(socket) == SENTINEL.encode()
 
@@ -380,7 +383,7 @@ def test_unicode_nothing_requested_text(
             engine.keyboard_type("é", method="unicode")
         elapsed = time.monotonic() - started
 
-    assert str(excinfo.value) == "Failed to type unicode: 'é'"
+    assert str(excinfo.value).splitlines()[0] == "Failed to type unicode text (1 character)."
     # The paste chord went out; the failure is reported after the 4 s transfer bound.
     assert elapsed >= 4.0 * 0.9, elapsed
     _wait_until(lambda: _selection(socket) == SENTINEL.encode(), "the restored selection")
@@ -475,7 +478,7 @@ def test_keyboard_type_method_unicode_reaches_kwrite(
     engine.window_focus(WindowSelector(app_id="org.kde.kwrite"))
     atspi = AtspiOracle(info.dbus_address)
 
-    result = engine.keyboard_type("한글", method="unicode")
+    result = engine.keyboard_type("한글", method="unicode", echo=True)
     assert result.render() == "Typed unicode: '한글'\nRoute: paste:ctrl+v; 2 characters"
     _wait_until(lambda: _focused_kwrite_text(atspi) == "한글", "document text '한글'")
 

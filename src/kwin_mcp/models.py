@@ -960,11 +960,16 @@ class KeyboardTypeResult(ActionResult):
     method: TypeMethod
     route: str
     chars: int
-    echo: str
+    # The text as text_echo() renders it, only when the caller asked for it
+    # (echo=True): typed text can be a password.
+    echo: str | None = None
 
     def summary(self) -> str:
         prefix = "Typed unicode" if self.method == "unicode" else "Typed"
-        return f"{prefix}: {self.echo}\nRoute: {self.route}; {self.chars} characters"
+        length = count(self.chars, "character")
+        if self.echo is None:
+            return f"{prefix}: {length} (not echoed).\nRoute: {self.route}"
+        return f"{prefix}: {self.echo}\nRoute: {self.route}; {length}"
 
 
 class KeyboardHoldResult(ActionResult):

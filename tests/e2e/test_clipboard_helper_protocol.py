@@ -559,7 +559,7 @@ def test_helper_phase_timeouts(
     The bounds are the 0.11 ones (READY 10 s incl. margin, ARMED 2 s,
     TRANSFERRED 4 s, RESTORE 5 s). Once the helper owns the text, RESTORE is
     still sent whatever phase stalled. The failure is the ``None`` route that
-    the engine words as ``Failed to type unicode: ...``.
+    the engine words as ``Failed to type unicode text (N characters).``.
     """
     bound = float(getattr(kwin_input, timeout_attr))
     expected_bound = {"READY": 10.0, "ARMED": 2.0, "TRANSFERRED": 4.0, "RESTORED": 5.0}[stall]

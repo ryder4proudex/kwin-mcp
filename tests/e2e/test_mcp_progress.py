@@ -585,7 +585,7 @@ async def test_keyboard_type_progress_every_half_second() -> None:
         large = ("abcdefghij" * 200)[:2000]
         large_log = ProgressLog()
         typed, rendered = await client.call_structured(
-            "keyboard_type", {"text": large}, progress_callback=large_log
+            "keyboard_type", {"text": large, "echo": True}, progress_callback=large_log
         )
         await large_log.settle()
         assert typed["chars"] == 2000, typed

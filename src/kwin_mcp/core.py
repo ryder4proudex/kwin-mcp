@@ -108,6 +108,7 @@ from kwin_mcp.models import (
     WindowList,
     WindowPlaceResult,
     WindowSelector,
+    count,
     text_echo,
 )
 from kwin_mcp.screenshot import (
@@ -2159,9 +2160,17 @@ class AutomationEngine:
         return KeyboardPressResult(keys=keys, frames=frames, held=held, warnings=warnings)
 
     def keyboard_type(
-        self, text: str, method: TypeMethod = "keys", capture: Capture | None = None
+        self,
+        text: str,
+        method: TypeMethod = "keys",
+        capture: Capture | None = None,
+        echo: bool = False,
     ) -> KeyboardTypeResult:
-        """Insert text at the keyboard focus: per-key US-QWERTY events, or unicode text."""
+        """Insert text at the keyboard focus: per-key US-QWERTY events, or unicode text.
+
+        The result repeats the text only with ``echo``; otherwise it reports
+        the length, so a typed password does not end up in the transcript.
+        """
         if method == "keys":
             check_typeable(text)
         elif "\0" in text:
@@ -2198,7 +2207,11 @@ class AutomationEngine:
                 before_paste=before_paste,
             )
             if typed is None:
-                msg = f"Failed to type unicode: {text_echo(text)}"
+                msg = (
+                    f"Failed to type unicode text ({count(len(text), 'character')}).\n"
+                    "Check that the focused app accepts text input; for US-QWERTY text, "
+                    'retry with method="keys".'
+                )
                 raise RuntimeError(msg)
             route = typed.render()
 
@@ -2207,7 +2220,7 @@ class AutomationEngine:
             method=method,
             route=route,
             chars=len(text),
-            echo=text_echo(text),
+            echo=text_echo(text) if echo else None,
             frames=frames,
             held=held,
             warnings=warnings,

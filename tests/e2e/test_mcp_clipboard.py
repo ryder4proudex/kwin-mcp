@@ -241,7 +241,7 @@ async def test_unicode_paste_restores_prior_clipboard_with_its_own_owner(tmp_pat
         atspi = await _open_kwrite(client, info, tmp_path, "unicode-restore")
         async with _prior_clipboard_owner(socket, PRIOR_CLIPBOARD) as owner:
             typed, text = await client.call_structured(
-                "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode"}
+                "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode", "echo": True}
             )
             assert text.splitlines()[0] == f"Typed unicode: {UNICODE_MARKER!r}"
             assert typed["route"] == "paste:ctrl+v", typed
@@ -264,7 +264,7 @@ async def test_unicode_paste_clears_text_when_clipboard_was_empty(tmp_path: Path
         empty = await _tool_error(client, "clipboard_read")
         assert empty.startswith("Failed to read clipboard: "), empty
         _, text = await client.call_structured(
-            "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode"}
+            "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode", "echo": True}
         )
         assert text.splitlines()[0] == f"Typed unicode: {UNICODE_MARKER!r}"
         await _wait_for_text(atspi, UNICODE_MARKER)
@@ -286,7 +286,7 @@ async def test_unicode_paste_waits_for_slow_prior_owner(tmp_path: Path) -> None:
             async with anyio.create_task_group() as group:
                 group.start_soon(resume_owner)
                 _, text = await client.call_structured(
-                    "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode"}
+                    "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode", "echo": True}
                 )
             assert text.splitlines()[0] == f"Typed unicode: {UNICODE_MARKER!r}"
             await _wait_for_text(atspi, UNICODE_MARKER)
@@ -305,7 +305,10 @@ async def test_unicode_paste_fails_without_pasting_when_prior_owner_never_answer
                 message = await _tool_error(
                     client, "keyboard_type", {"text": UNICODE_MARKER, "method": "unicode"}
                 )
-                assert message == f"Failed to type unicode: {UNICODE_MARKER!r}"
+                assert message.splitlines()[0] == (
+                    f"Failed to type unicode text ({len(UNICODE_MARKER)} characters)."
+                )
+                assert UNICODE_MARKER not in message
                 # No Ctrl+V was sent, so nothing can arrive late.
                 assert _focused_text(atspi) == ""
                 assert owner.poll() is None
@@ -332,9 +335,9 @@ async def test_unicode_paste_rejects_oversized_multiline_text_without_side_effec
                     "keyboard_type", {"text": oversized, "method": "unicode"}
                 )
             assert result.is_error is True
-            assert text_of(result) == (
+            assert text_of(result).splitlines()[0] == (
                 "Error executing tool keyboard_type: "
-                f"Failed to type unicode: <{len(oversized)} characters>"
+                f"Failed to type unicode text ({len(oversized)} characters)."
             )
             assert _focused_text(atspi) == ""
             # The original owner was never replaced, so nothing took the selection.
