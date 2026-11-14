@@ -472,7 +472,8 @@ def test_app_log_tail_zero_unknown_pid_and_empty(session: AutomationEngine) -> N
     session.app_launch("true")
     with pytest.raises(ValueError) as exc_info:
         session.app_log(pid=999999)
-    message = str(exc_info.value)
+    message, remedy = str(exc_info.value).split("\n")
+    assert remedy.startswith("app_log reads only apps started with app_launch"), remedy
     prefix = "No app with PID 999999. Available PIDs: "
     assert message.startswith(prefix), message
     listed = ast.literal_eval(message.removeprefix(prefix))
@@ -504,7 +505,7 @@ def test_app_log_rejects_an_unknown_pid(session: AutomationEngine) -> None:
     with pytest.raises(ValueError) as exc_info:
         session.app_log(pid=-1)
 
-    message = str(exc_info.value)
+    message = str(exc_info.value).splitlines()[0]
     assert message.startswith("No app with PID -1. Available PIDs: ["), message
     assert message.endswith("]"), message
 

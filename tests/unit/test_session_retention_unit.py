@@ -363,7 +363,11 @@ def test_app_registry_lists_launches_and_tails_logs(harness: _Harness, tmp_path:
         known = [printer.pid, sleeper.pid, silent.pid]
         with pytest.raises(ValueError) as excinfo:
             live.read_app_log(1)
-        assert str(excinfo.value) == f"No app with PID 1. Available PIDs: {known}"
+        assert str(excinfo.value) == (
+            f"No app with PID 1. Available PIDs: {known}\n"
+            "app_log reads only apps started with app_launch in this session; "
+            "use a pid from app_launch or session_info."
+        )
     finally:
         live.stop()
     assert all(entry.running is False for entry in live.apps())

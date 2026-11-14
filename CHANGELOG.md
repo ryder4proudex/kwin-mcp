@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `app_log` with a PID that this session did not launch now says, after the list of available PIDs, that it reads only apps started with `app_launch` and where to find their PIDs.
 - An unknown key name in `keyboard_press` or `keyboard_hold` (`Unknown key: esc`) now has a remedy line: close key names (`Did you mean 'escape'?`) and what a key can be.
 - Result text counts agree with their noun: `Found 1 element matching ...`, `# Accessibility Tree (1 element)`, `Wrote 1 element ...`, `(last 1 line)` and `after 1 node` instead of the plural.
 - Open Qt context menus and combo box lists are now visible to `element_query`, `{ref}` targets and strict `element_act`. Qt's AT-SPI2 bridge leaves `Qt::Popup` windows out of the application's children, so no walk reached them; the AT-SPI worker now subscribes to `object:state-changed:showing`, remembers each popup that opens with the application as its parent, and walks it (while it still shows) as a top-level mapped to its KWin `popup` window. Popups opened before the worker started are not seen. See the Qt popups entry under Limitations in the README for items shared with the menu bar.

@@ -303,7 +303,11 @@ def _read_app_log(apps: dict[int, AppInfo], pid: int, last_n_lines: int) -> AppL
     app = apps.get(pid)
     if app is None:
         available = list(apps.keys())
-        msg = f"No app with PID {pid}. Available PIDs: {available}"
+        msg = (
+            f"No app with PID {pid}. Available PIDs: {available}\n"
+            "app_log reads only apps started with app_launch in this session; "
+            "use a pid from app_launch or session_info."
+        )
         raise ValueError(msg)
     lines: list[str] = []
     if app.log_path.exists():
