@@ -13,8 +13,14 @@ from collections.abc import Mapping
 _PROBE_TIMEOUT_S = 8.0
 
 
-def _probe(env: Mapping[str, str]) -> str:
-    """Return a reachable bus address, or an actionable, recoverable error."""
+def _probe(env: Mapping[str, str]) -> tuple[str, str]:
+    """Return a reachable bus address and its bus id, or an actionable, recoverable error.
+
+    The address is returned exactly as advertised. ``GetId`` is the bus id, which
+    is not the server guid that libdbus checks against a ``guid=`` address key
+    (both dbus-daemon and dbus-broker use different values), so it must never go into the
+    address: a mismatching guid makes every connection fail and libatspi abort.
+    """
     import dbus.bus
 
     address = env.get("AT_SPI_BUS_ADDRESS", "")
@@ -54,16 +60,22 @@ def _probe(env: Mapping[str, str]) -> str:
             "`systemctl --user restart at-spi-dbus-bus.service`; applications may need "
             "to reconnect. For an isolated session, recreate only that session."
         )
-        name = exc.get_dbus_name() if hasattr(exc, "get_dbus_name") else type(exc).__name__
+        get_dbus_name = getattr(exc, "get_dbus_name", None)
+        name = get_dbus_name() if callable(get_dbus_name) else type(exc).__name__
         raise RuntimeError(
             f"AT-SPI2 bus unavailable: {source} could not be resolved or connected "
             f"({name}). Request refused before starting an accessibility worker. {remedy}"
         ) from exc
-    return address if "guid=" in address else f"{address},guid={bus_id}"
+    return address, bus_id
 
 
-def checked_address(env: Mapping[str, str]) -> str:
-    """Bound even D-Bus authentication, which has no Python-level timeout."""
+def checked_address(env: Mapping[str, str]) -> tuple[str, str]:
+    """Return ``(address, bus_id)`` of the reachable accessibility bus.
+
+    The bus id changes when the bus restarts behind the same socket path, so
+    callers key their native clients to the pair. Runs in a subprocess to bound
+    even D-Bus authentication, which has no Python-level timeout.
+    """
     selected = {
         key: env[key] for key in ("DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS") if key in env
     }
@@ -89,12 +101,13 @@ def checked_address(env: Mapping[str, str]) -> str:
     response = json.loads(result.stdout)
     if "error" in response:
         raise RuntimeError(response["error"])
-    return str(response["address"])
+    return str(response["address"]), str(response["bus_id"])
 
 
 if __name__ == "__main__":
     try:
-        payload = {"address": _probe(json.load(sys.stdin))}
+        address, bus_id = _probe(json.load(sys.stdin))
+        payload = {"address": address, "bus_id": bus_id}
     except RuntimeError as error:
         payload = {"error": str(error)}
     print(json.dumps(payload))

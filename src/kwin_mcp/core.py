@@ -472,7 +472,7 @@ class AutomationEngine:
         self._atspi_proc: subprocess.Popen[bytes] | None = None
         self._atspi_bus: str = ""
         self._atspi_buffer: bytes = b""
-        self._atspi_a11y: str = ""
+        self._atspi_a11y: tuple[str, str] = ("", "")
         # Generation of the current AT-SPI worker; refs embed it (e<gen>.<n>).
         # Incremented on every spawn, so 0 means no worker was started yet.
         self._atspi_generation: int = 0
@@ -537,16 +537,15 @@ class AutomationEngine:
         env.pop("DISPLAY", None)
         return env
 
-    def _a11y_bus_address(self, env: dict[str, str]) -> str:
-        """Identity of the session's reachable AT-SPI bus; fail before native init.
+    def _a11y_bus_address(self, env: dict[str, str]) -> tuple[str, str]:
+        """Address and bus id of the session's reachable AT-SPI bus; fail before native init.
 
         Apps and the worker reach the accessibility bus through
         ``AT_SPI_BUS_ADDRESS`` when it is set, else through
-        ``org.a11y.Bus.GetAddress`` on the session bus. The reply embeds the
-        bus's guid (probed explicitly if absent), so identity changes when its
-        socket path stays the same after a restart. A worker bound to the old identity keeps
-        answering with no applications from its dead connection forever, so
-        this is probed on every call.
+        ``org.a11y.Bus.GetAddress`` on the session bus. The bus id changes when
+        the bus restarts behind the same socket path. A worker bound to the old
+        bus keeps answering with no applications from its dead connection
+        forever, so this is probed on every call.
         """
         from kwin_mcp.atspi_bus import checked_address
 
@@ -569,7 +568,7 @@ class AutomationEngine:
         env = self._session_env()
         bus = env.get("DBUS_SESSION_BUS_ADDRESS", "")
         a11y = self._a11y_bus_address(env)
-        env["AT_SPI_BUS_ADDRESS"] = a11y
+        env["AT_SPI_BUS_ADDRESS"] = a11y[0]
         proc = self._atspi_proc
         if proc is not None and (
             process_registry.poll(proc) is not None
@@ -721,7 +720,7 @@ class AutomationEngine:
         proc = self._atspi_proc
         self._atspi_proc = None
         self._atspi_bus = ""
-        self._atspi_a11y = ""
+        self._atspi_a11y = ("", "")
         self._atspi_buffer = b""
         if proc is None:
             return

@@ -57,43 +57,65 @@ def test_explicit_override_failure_does_not_fall_back(monkeypatch: pytest.Monkey
     assert "private-value" not in str(error.value)
 
 
-def test_reachable_bus_is_pinned_to_verified_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reachable_bus_keeps_the_advertised_address(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = Mock()
     connection.get_object.return_value.GetId.return_value = "abc123"
     monkeypatch.setattr(dbus.bus, "BusConnection", Mock(return_value=connection))
-    assert _probe({"AT_SPI_BUS_ADDRESS": "unix:path=/bus"}) == "unix:path=/bus,guid=abc123"
+    assert _probe({"AT_SPI_BUS_ADDRESS": "unix:path=/bus"}) == ("unix:path=/bus", "abc123")
     connection.close.assert_called_once()
 
 
-def test_worker_receives_verified_address(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_receives_the_address_and_follows_the_bus_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = core.AutomationEngine()
     monkeypatch.setattr(engine, "_session_env", lambda: {"DBUS_SESSION_BUS_ADDRESS": "session"})
-    monkeypatch.setattr(engine, "_a11y_bus_address", lambda env: "unix:path=/verified,guid=abc")
-    proc = SimpleNamespace()
-    spawn = Mock(return_value=proc)
+    identity = ["abc"]
+    monkeypatch.setattr(engine, "_a11y_bus_address", lambda env: ("unix:path=/v", identity[0]))
+    monkeypatch.setattr(core.process_registry, "poll", lambda proc: None)
+    teardown = Mock(side_effect=lambda: setattr(engine, "_atspi_proc", None))
+    monkeypatch.setattr(engine, "_teardown_atspi_worker", teardown)
+    spawn = Mock(side_effect=lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(core.process_registry, "spawn", spawn)
-    assert engine._ensure_atspi_worker() is proc
-    assert spawn.call_args.kwargs["env"]["AT_SPI_BUS_ADDRESS"] == "unix:path=/verified,guid=abc"
+
+    first = engine._ensure_atspi_worker()
+    assert engine._ensure_atspi_worker() is first
+    identity[0] = "restarted"
+    assert engine._ensure_atspi_worker() is not first
+
+    assert [call.kwargs["env"]["AT_SPI_BUS_ADDRESS"] for call in spawn.call_args_list] == [
+        "unix:path=/v",
+        "unix:path=/v",
+    ]
+    teardown.assert_called_once()
     engine._atspi_proc = None
 
 
-def test_real_dbus_connection_identity() -> None:
-    if not shutil.which("dbus-run-session"):
-        pytest.skip("dbus-run-session is unavailable")
+def test_address_without_guid_stays_connectable() -> None:
+    """Regression: a GetId value written as ``guid=`` made libdbus reject the bus.
+
+    The live desktop's dbus-broker advertises its address without a guid; the
+    worker then aborted in libatspi on every call although the bus was healthy.
+    """
+    if not shutil.which("dbus-run-session") or not shutil.which("dbus-send"):
+        pytest.skip("dbus-run-session or dbus-send is unavailable")
+    script = (
+        "import os, subprocess; from kwin_mcp.atspi_bus import checked_address; "
+        "plain = ','.join(p for p in os.environ['DBUS_SESSION_BUS_ADDRESS'].split(',') "
+        "if not p.startswith('guid=')); "
+        "address, bus_id = checked_address({'AT_SPI_BUS_ADDRESS': plain}); "
+        "assert address == plain, address; "
+        "out = subprocess.run(['dbus-send', '--bus=' + address, '--print-reply=literal', "
+        "'--dest=org.freedesktop.DBus', '/org/freedesktop/DBus', "
+        "'org.freedesktop.DBus.GetId'], capture_output=True, text=True, timeout=10, "
+        "check=True).stdout; "
+        "assert out.split() == [bus_id], (out, bus_id)"
+    )
     result = subprocess.run(
-        [
-            "dbus-run-session",
-            "--",
-            sys.executable,
-            "-c",
-            "import os; from kwin_mcp.atspi_bus import checked_address; "
-            "env = {'AT_SPI_BUS_ADDRESS': os.environ['DBUS_SESSION_BUS_ADDRESS']}; "
-            "address = checked_address(env); "
-            "assert 'guid=' in address",
-        ],
+        ["dbus-run-session", "--", sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
 
