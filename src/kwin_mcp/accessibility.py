@@ -116,6 +116,8 @@ _UNMAPPED = _WindowMapping(None, "not-a-window")
 # non-candidate — fails the strict search closed instead of being skipped.
 # The depth limit exists for the same reason: no match may hide below it.
 _ACTION_SEARCH_MAX_DEPTH = 64
+# An alias link is looked for among this many children of a parent; past it the child is kept.
+_ALIAS_MAX_SIBLINGS = 512
 
 # How long a wait for present elements re-polls matches whose window mapping
 # failed because KWin's window list changed during the walk.
@@ -1388,6 +1390,8 @@ def _is_alias(
 ) -> bool:
     """Whether ``child``'s parent chain reaches ``app`` through another listed child.
 
+    Every link must also hold from above: each parent must enumerate the node
+    below it, so the child is proven reachable through that other top-level.
     Unreadable or broken chains keep the child: leaving out a real top-level
     would hide its elements, while keeping an alias only shows them twice.
     """
@@ -1399,6 +1403,8 @@ def _is_alias(
             return False
         if parent is None:
             return False
+        if parent != app and not _enumerates(parent, node):
+            return False
         if parent == app:
             return node is not child and any(
                 sibling is not None and sibling is not child and sibling == node
@@ -1406,6 +1412,15 @@ def _is_alias(
             )
         node = parent
     return False
+
+
+def _enumerates(parent: Any, node: object) -> bool:
+    """Whether ``parent`` lists ``node`` among its first ``_ALIAS_MAX_SIBLINGS`` children."""
+    try:
+        count = min(parent.get_child_count(), _ALIAS_MAX_SIBLINGS)
+        return any(parent.get_child_at_index(i) == node for i in range(count))
+    except Exception:
+        return False
 
 
 class _PopupTracker:

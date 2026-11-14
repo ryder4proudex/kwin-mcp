@@ -26,7 +26,7 @@ WINDOWS: list[KWinWindow] = [
 ]
 
 
-def _apps(*, broken_parent: bool = False) -> list[Node]:
+def _apps(*, broken_parent: bool = False, unlisted: bool = False) -> list[Node]:
     """systemsettings: frame > layered pane > host > quick root > Keyboard entry.
 
     The quick root is also listed as a second child of the application, the way
@@ -45,6 +45,10 @@ def _apps(*, broken_parent: bool = False) -> list[Node]:
     # Node() made the application the parent of every listed child; Qt reports
     # the alias's real parent.
     quick_root.parent = None if broken_parent else host
+    if unlisted:
+        # The chain points through the frame, but no node there enumerates the
+        # child: it is reachable only from the application, so it is no alias.
+        host.children = []
     return [app]
 
 
@@ -89,3 +93,23 @@ def test_child_with_unreadable_parent_chain_is_kept(monkeypatch: pytest.MonkeyPa
 
     assert response["ok"] is True
     assert len(response["result"]) == 2
+
+
+def test_child_its_parent_does_not_enumerate_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A parent chain alone proves nothing: every link must list the node below it.
+    invoked = install(monkeypatch, _apps(unlisted=True), WINDOWS)
+    response = accessibility._handle_request(
+        {"op": "query", "locator": {"role": "list item", "query": "Keyboard"}}
+    )
+
+    assert response["ok"] is True
+    assert len(response["result"]) == 1
+    strict = accessibility._handle_request(
+        {
+            "op": "action",
+            "address": {"strict": {"app": "systemsettings", "query": "Keyboard"}},
+            "action_name": "Press",
+        }
+    )
+    assert strict["ok"] is True, strict
+    assert invoked == [("Press", 0)]
