@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import shlex
 import stat
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -98,3 +99,75 @@ def test_script_requires_the_private_dir() -> None:
     session = Session()
     with pytest.raises(RuntimeError, match="accessibility runtime dir"):
         session._build_wrapper_script(SessionConfig())
+
+
+_RESTORE = 'if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$HOST_RUNTIME_DIR"'
+
+
+def _run_switch_and_restore(
+    tmp_path: Path, *, host_runtime_dir: str | None, fail_on: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run the wrapper's switch and restore steps with a stub activation updater.
+
+    The accessibility steps between them need a live bus and are covered by the
+    E2E test; here only the fail-closed branches around them are exercised.
+    """
+    private = tmp_path / "kwin-mcp-a11y-unit"
+    script = _script(private)
+    switch = script[script.index("ATSPI_RUNTIME_DIR=") : script.index("ATSPI_UP=1\n")]
+    restore_at = script.index(_RESTORE)
+    restore = script[restore_at : script.index("\nfi\n", restore_at) + len("\nfi\n")]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    log = tmp_path / "calls.log"
+    stub = bin_dir / "dbus-update-activation-environment"
+    stub.write_text(
+        '#!/bin/sh\necho "$*" >> "$STUB_LOG"\n'
+        'case "$*" in *"$STUB_FAIL_ON"*) [ -n "$STUB_FAIL_ON" ] && exit 1 ;; esac\nexit 0\n'
+    )
+    stub.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "STUB_LOG": str(log)}
+    env["STUB_FAIL_ON"] = fail_on
+    if host_runtime_dir is not None:
+        env["XDG_RUNTIME_DIR"] = host_runtime_dir
+    body = f"{switch}echo SWITCHED\n{restore}echo RESTORED\n"
+    return subprocess.run(
+        ["bash", "-c", body], env=env, capture_output=True, text=True, check=False, timeout=10
+    )
+
+
+def test_switch_and_restore_point_activation_back_at_the_host_dir(tmp_path: Path) -> None:
+    result = _run_switch_and_restore(tmp_path, host_runtime_dir="/run/host-rt")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["SWITCHED", "RESTORED"]
+    calls = (tmp_path / "calls.log").read_text().splitlines()
+    assert calls == [
+        f"XDG_RUNTIME_DIR={tmp_path / 'kwin-mcp-a11y-unit'}",
+        "XDG_RUNTIME_DIR=/run/host-rt",
+    ]
+
+
+def test_failed_switch_refuses_to_activate_the_launcher(tmp_path: Path) -> None:
+    result = _run_switch_and_restore(
+        tmp_path, host_runtime_dir="/run/host-rt", fail_on="kwin-mcp-a11y-unit"
+    )
+    assert result.returncode == 1
+    assert "SWITCHED" not in result.stdout
+    assert "refusing to activate it in the shared one" in result.stderr
+
+
+def test_failed_restore_stops_the_session(tmp_path: Path) -> None:
+    result = _run_switch_and_restore(tmp_path, host_runtime_dir="/run/host-rt", fail_on="host-rt")
+    assert result.returncode == 1
+    assert "RESTORED" not in result.stdout
+    assert "could not restore XDG_RUNTIME_DIR" in result.stderr
+
+
+@pytest.mark.parametrize("host_runtime_dir", [None, ""])
+def test_unset_host_runtime_dir_stops_before_the_switch(
+    tmp_path: Path, host_runtime_dir: str | None
+) -> None:
+    result = _run_switch_and_restore(tmp_path, host_runtime_dir=host_runtime_dir)
+    assert result.returncode == 1
+    assert "XDG_RUNTIME_DIR is not set" in result.stderr
+    assert not (tmp_path / "calls.log").exists()

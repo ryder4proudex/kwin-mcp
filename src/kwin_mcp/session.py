@@ -1473,12 +1473,19 @@ atspi_start_directly() {{
 # session's bus, and once it exits, a dead path on which libatspi aborts
 # (issue #6). The launcher therefore gets a private runtime dir, for its spawn
 # only: services activated later (portals) need the real one for the Wayland
-# socket, so it is restored once the accessibility bus is up.
+# socket, so it is restored once the accessibility bus is up. Without either
+# step the session must not start: a launcher activated in the shared dir, or
+# services left pointing at the private dir, is exactly what this prevents.
 ATSPI_RUNTIME_DIR={atspi_runtime_dir}
 HOST_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-}}
+if [ -z "$HOST_RUNTIME_DIR" ]; then
+    echo "XDG_RUNTIME_DIR is not set; the session needs it for its Wayland socket" >&2
+    exit 1
+fi
 if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$ATSPI_RUNTIME_DIR"; then
-    echo "WARN: could not give the AT-SPI bus launcher a private runtime dir;" \\
-        "it may replace another session's accessibility bus socket"
+    echo "could not give the AT-SPI bus launcher a private runtime dir;" \\
+        "refusing to activate it in the shared one" >&2
+    exit 1
 fi
 ATSPI_UP=1
 if ! ATSPI_ERR=$(dbus-send --session --print-reply --reply-timeout=10000 \\
@@ -1506,7 +1513,7 @@ if [ "$ATSPI_UP" = 1 ] && ! ATSPI_ERR=$(dbus-send --session --print-reply --repl
     echo "WARN: AT-SPI accessibility could not be switched on, apps that check it" \\
         "(such as Firefox) may expose no accessibility tree: ${{ATSPI_ERR:-unknown error}}"
 fi
-if [ "$ATSPI_UP" = 1 ] && [ -n "$HOST_RUNTIME_DIR" ]; then
+if [ "$ATSPI_UP" = 1 ]; then
     ATSPI_ADDRESS=$(dbus-send --session --print-reply=literal --reply-timeout=10000 \\
         --dest=org.a11y.Bus /org/a11y/bus org.a11y.Bus.GetAddress 2>/dev/null)
     case "$(echo $ATSPI_ADDRESS)" in
@@ -1517,10 +1524,9 @@ if [ "$ATSPI_UP" = 1 ] && [ -n "$HOST_RUNTIME_DIR" ]; then
             ;;
     esac
 fi
-if [ -n "$HOST_RUNTIME_DIR" ] \\
-    && ! dbus-update-activation-environment XDG_RUNTIME_DIR="$HOST_RUNTIME_DIR"; then
-    echo "WARN: could not restore XDG_RUNTIME_DIR for D-Bus activated services;" \\
-        "portals may not find the session's Wayland socket"
+if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$HOST_RUNTIME_DIR"; then
+    echo "could not restore XDG_RUNTIME_DIR for D-Bus activated services" >&2
+    exit 1
 fi
 
 # Pre-set D-Bus activation environment BEFORE starting KWin.
