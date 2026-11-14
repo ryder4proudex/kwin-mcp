@@ -176,7 +176,7 @@ def test_return_tab_real_keys(probe: Probe) -> None:
         mark = probe.mark()
         with pytest.raises(ValueError) as excinfo:
             probe.engine.keyboard_press(malformed)
-        assert str(excinfo.value) == f"Unknown key: {malformed}"
+        assert str(excinfo.value).splitlines()[0] == f"Unknown key: {malformed}"
         # No partial press: not even the leading ctrl.
         assert probe.settle(since=mark) == [], malformed
     assert probe.engine.session_info().held == HeldInput()
@@ -190,7 +190,7 @@ def test_unknown_key_error_before_input(probe: Probe) -> None:
     with pytest.raises(ValueError) as excinfo:
         probe.engine.keyboard_press("ctrl+nokey")
 
-    assert str(excinfo.value) == "Unknown key: ctrl+nokey"
+    assert str(excinfo.value).splitlines()[0] == "Unknown key: ctrl+nokey"
     assert probe.settle(since=mark) == []
     assert probe.status("key_log:") == before
     assert probe.status("raw_events:").startswith("raw_events: bp=0 br=0 kp=0 kr=0 ")

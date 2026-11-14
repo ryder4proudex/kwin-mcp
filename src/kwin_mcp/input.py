@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import ctypes.util
+import difflib
 import os
 import select
 import shutil
@@ -239,6 +240,18 @@ def _resolve_modifiers(modifiers: list[str] | None) -> list[int]:
     return codes
 
 
+def _unknown_key_message(chord: str, name: str) -> str:
+    """``Unknown key: <chord>``, then close key names if any and what a key can be."""
+    close = difflib.get_close_matches(
+        name.lower(), [*_EVDEV_KEY_MAP, *_MODIFIER_KEYS], n=3, cutoff=0.6
+    )
+    hint = f"Did you mean {', '.join(repr(c) for c in close)}? " if close else ""
+    return (
+        f"Unknown key: {chord}\n{hint}Use one character, a key name such as Return, Escape, "
+        'BackSpace, Page_Down or F1-F12, or modifiers joined with "+" (ctrl+shift+t).'
+    )
+
+
 def chord_keycodes(chord: str) -> list[int]:
     """Parse a KeyChord into evdev keycodes: modifiers in chord order, then the main key.
 
@@ -246,8 +259,8 @@ def chord_keycodes(chord: str) -> list[int]:
     ``super``/``meta``, ``return``, ``f4``, ``a``). A chord of modifiers only
     uses its last modifier as the main key (``ctrl+shift``). When several
     non-modifier names are given, the last one is the main key, as before.
-    Raises ValueError ``Unknown key: <chord>`` for any unknown or empty name,
-    before any input is sent.
+    Raises ValueError ``Unknown key: <chord>`` (then a remedy line) for any
+    unknown or empty name, before any input is sent.
     """
     modifiers: list[int] = []
     keycode: int | None = None
@@ -259,8 +272,7 @@ def chord_keycodes(chord: str) -> list[int]:
             continue
         keycode = _key_name_to_evdev(name)
         if keycode is None:
-            msg = f"Unknown key: {chord}"
-            raise ValueError(msg)
+            raise ValueError(_unknown_key_message(chord, name))
     if keycode is None:
         # Every name was a modifier (split always yields at least one part).
         keycode = modifiers.pop()

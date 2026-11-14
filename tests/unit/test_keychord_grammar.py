@@ -62,7 +62,30 @@ def test_keychord_grammar_table(chord: str, expected: list[int]) -> None:
 def test_keychord_unknown_name_is_an_error(chord: str) -> None:
     with pytest.raises(ValueError, match=r"^Unknown key: ") as excinfo:
         chord_keycodes(chord)
-    assert str(excinfo.value) == f"Unknown key: {chord}"
+    first, remedy = str(excinfo.value).split("\n")
+    assert first == f"Unknown key: {chord}"
+    assert remedy.endswith(_KEY_NAMES)
+
+
+_KEY_NAMES = (
+    "Use one character, a key name such as Return, Escape, BackSpace, Page_Down or F1-F12, "
+    'or modifiers joined with "+" (ctrl+shift+t).'
+)
+
+
+@pytest.mark.parametrize(
+    ("chord", "suggestion"),
+    [
+        ("esc", "Did you mean 'escape'? "),
+        ("ctrl+retrun", "Did you mean 'return'? "),
+        ("PageDwn", "Did you mean 'pagedown', 'page_down', 'pageup'? "),
+        ("ctrl+", ""),
+    ],
+)
+def test_unknown_key_suggests_close_names(chord: str, suggestion: str) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        chord_keycodes(chord)
+    assert str(excinfo.value).split("\n")[1] == suggestion + _KEY_NAMES
 
 
 @pytest.mark.qa("QA-INP-054")

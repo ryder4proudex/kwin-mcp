@@ -225,7 +225,7 @@ def test_invalid_key_in_hold_sends_nothing(probe: Probe) -> None:
     with pytest.raises(ValueError) as excinfo:
         probe.engine.keyboard_hold("press", "ctrl+notakey")
 
-    assert str(excinfo.value) == "Unknown key: ctrl+notakey"
+    assert str(excinfo.value).splitlines()[0] == "Unknown key: ctrl+notakey"
     assert probe.settle(since=mark) == []
     assert probe.status("key_log:") == before
     assert probe.engine.session_info().held == HeldInput()

@@ -226,9 +226,11 @@ async def _error_table(client: Client, after_each: Callable[[], Awaitable[None]]
         finally:
             await client.call_structured("pointer_hold", {"phase": "release", "target": POINT})
 
-        # The contract keeps 0.11's single-line text for an unknown key (contract §2 row 20).
+        # 0.11's first line, then a remedy naming valid keys.
         assert await _tool_error(client, "keyboard_press", {"keys": "nosuchkey"}) == (
             "Unknown key: nosuchkey",
+            "Use one character, a key name such as Return, Escape, BackSpace, Page_Down or "
+            'F1-F12, or modifiers joined with "+" (ctrl+shift+t).',
         )
         await after_each()
 
