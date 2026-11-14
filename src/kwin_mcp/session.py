@@ -1359,6 +1359,9 @@ echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
 # of this script, in its process group, which session_stop signals as a whole.
 # Only KWin is tracked here.
 cleanup() {{
+    # Before KWin starts there is nothing to stop; a bare `wait` would instead
+    # wait for directly started AT-SPI helpers, which the caller stops as a group.
+    [ -n "${{KWIN_PID:-}}" ] || return 0
     kill $KWIN_PID 2>/dev/null
     wait $KWIN_PID 2>/dev/null
 }}
@@ -1479,10 +1482,12 @@ atspi_start_directly() {{
 ATSPI_RUNTIME_DIR={atspi_runtime_dir}
 HOST_RUNTIME_DIR=${{XDG_RUNTIME_DIR:-}}
 if [ -z "$HOST_RUNTIME_DIR" ]; then
+    echo "FAILED"
     echo "XDG_RUNTIME_DIR is not set; the session needs it for its Wayland socket" >&2
     exit 1
 fi
 if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$ATSPI_RUNTIME_DIR"; then
+    echo "FAILED"
     echo "could not give the AT-SPI bus launcher a private runtime dir;" \\
         "refusing to activate it in the shared one" >&2
     exit 1
@@ -1525,6 +1530,7 @@ if [ "$ATSPI_UP" = 1 ]; then
     esac
 fi
 if ! dbus-update-activation-environment XDG_RUNTIME_DIR="$HOST_RUNTIME_DIR"; then
+    echo "FAILED"
     echo "could not restore XDG_RUNTIME_DIR for D-Bus activated services" >&2
     exit 1
 fi
