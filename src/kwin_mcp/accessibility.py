@@ -1213,6 +1213,12 @@ def _resolve_app(
     return pids, mappings, children
 
 
+# The D-Bus object path of every AT-SPI application node.
+_APPLICATION_PATH = "/org/a11y/atspi/accessible/root"
+# Popup top-levels the tracker remembers at most; the oldest is forgotten first.
+_POPUP_TRACK_LIMIT = 64
+
+
 def _toplevels(app: _AccessibleApp) -> list[_AccessibleTopLevel | None]:
     """The application's real top-levels: the nodes whose parent is ``app``.
 
@@ -1220,12 +1226,15 @@ def _toplevels(app: _AccessibleApp) -> list[_AccessibleTopLevel | None]:
     the offscreen QQuickWindow of a QQuickWidget, whose content is also part of
     the widget's own subtree (System Settings, Info Center): that child's parent
     is a node inside another top-level, so it is an alias and left out, and its
-    content is walked once, under the window that shows it. A child that
-    vanished stays as None, for the caller's window-set check.
+    content is walked once, under the window that shows it. Qt also leaves its
+    popups (context menus, combo box lists) out of the children although their
+    parent is the application; the :class:`_PopupTracker` saw them appear and
+    adds the ones still showing. A child that vanished stays as None, for the
+    caller's window-set check.
     """
     listed = [app.get_child_at_index(j) for j in range(app.get_child_count())]
     toplevels = [child for child in listed if child is None or not _is_alias(child, app, listed)]
-    return toplevels
+    return toplevels + _POPUPS.extra(app, toplevels)
 
 
 def _is_alias(
@@ -1251,6 +1260,85 @@ def _is_alias(
             )
         node = parent
     return False
+
+
+class _PopupTracker:
+    """Top-levels an application leaves out of its children, seen as they appear.
+
+    Qt's application node omits ``Qt::Popup`` windows (QMenu context menus,
+    combo box lists) from its children, so no walk from the desktop reaches
+    them, but a popup reports its parent as the application and announces
+    itself with ``object:state-changed:showing`` when it opens. The worker
+    feeds those events to :meth:`note`; :meth:`extra` returns the remembered
+    popups of an application that still show and are not already listed.
+    Popups opened before the worker subscribed are never seen.
+    """
+
+    def __init__(self) -> None:
+        self._seen: list[Any] = []
+
+    def note(self, source: Any) -> None:
+        """Remember ``source`` when it is a direct child of its application."""
+        try:
+            parent = source.get_parent()
+        except Exception:
+            return
+        if parent is None or not _is_application(parent):
+            return
+        if any(seen == source for seen in self._seen):
+            return
+        self._seen.append(source)
+        del self._seen[:-_POPUP_TRACK_LIMIT]
+
+    def extra(self, app: object, listed: Sequence[object | None]) -> list[Any]:
+        """``app``'s remembered popups that still show and are not in ``listed``.
+
+        Popups that no longer exist are forgotten.
+        """
+        if not self._seen:
+            return []
+        alive: list[Any] = []
+        extra: list[Any] = []
+        for popup in self._seen:
+            try:
+                states = _state_nicks(popup)
+                parent = popup.get_parent()
+            except Exception:
+                continue
+            if "defunct" in states:
+                continue
+            alive.append(popup)
+            if (
+                parent == app
+                and "showing" in states
+                and not any(item is not None and item == popup for item in listed)
+            ):
+                extra.append(popup)
+        self._seen = alive
+        return extra
+
+
+_POPUPS = _PopupTracker()
+
+
+def _is_application(node: Any) -> bool:
+    """Whether ``node`` is an application node, by its object path when it has one."""
+    path = getattr(node, "path", None)
+    if isinstance(path, str):
+        return path == _APPLICATION_PATH
+    try:
+        return node.get_role_name() == "application"
+    except Exception:
+        return False
+
+
+def _on_showing(event: Any) -> None:
+    """``object:state-changed:showing`` handler: track popups as they open."""
+    try:
+        if event.detail1:
+            _POPUPS.note(event.source)
+    except Exception:
+        return
 
 
 def _match_toplevel(
@@ -1636,6 +1724,7 @@ def _serve(generation: int) -> None:
     # worker idles in a GLib main loop that dispatches bus traffic as it arrives
     # and reads requests from a stdin watch.
     loop = GLib.MainLoop()
+    _subscribe_popups()
     fd = sys.stdin.fileno()
     pending = bytearray()
 
@@ -1655,6 +1744,26 @@ def _serve(generation: int) -> None:
 
     _unix_fd_add(fd, GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, on_stdin)
     loop.run()
+
+
+# The worker's event listener; kept referenced so it stays registered.
+_LISTENERS: list[Any] = []
+
+
+def _subscribe_popups() -> None:
+    """Feed ``object:state-changed:showing`` events to the popup tracker.
+
+    The subscription makes applications emit showing changes on the bus, which
+    the main loop dispatches between requests. Failing to subscribe only costs
+    the popups, so it is not an error.
+    """
+    try:
+        listener = Atspi.EventListener.new(_on_showing)
+        listener.register("object:state-changed:showing")
+    except Exception as exc:
+        print(f"kwin-mcp: cannot track popup menus: {exc}", file=sys.stderr)
+        return
+    _LISTENERS.append(listener)
 
 
 def _unix_fd_add(
