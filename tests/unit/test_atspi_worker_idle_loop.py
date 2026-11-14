@@ -10,6 +10,7 @@ requests used here never touch D-Bus.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -18,6 +19,8 @@ import types
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     import pytest
 
 # A GLib timeout stands in for bus traffic: it fires only if the worker
@@ -123,3 +126,29 @@ def test_stdin_watch_falls_back_to_glib_without_glibunix(monkeypatch: pytest.Mon
     condition = object()  # passed through unchanged
     accessibility._unix_fd_add(0, condition, callback)
     assert calls == [(fake_glib.PRIORITY_DEFAULT, 0, condition, callback)]
+
+
+def test_worker_without_an_accessibility_bus_answers_requests_that_need_none(
+    tmp_path: Path,
+) -> None:
+    """Nothing touches AT-SPI before a request needs it.
+
+    libatspi aborts the process when it cannot reach the accessibility bus, so a
+    worker that subscribed to events at start died before answering anything.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DBUS_SESSION_BUS_ADDRESS", "AT_SPI_BUS_ADDRESS", "DISPLAY"}
+    }
+    env["XDG_RUNTIME_DIR"] = str(tmp_path)
+    proc = subprocess.Popen(
+        [sys.executable, "-c", _WORKER],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    stdout, stderr = proc.communicate(b'{"op": "x"}\n', timeout=10)
+    assert proc.returncode == 0, stderr.decode()
+    assert json.loads(stdout)["ok"] is False

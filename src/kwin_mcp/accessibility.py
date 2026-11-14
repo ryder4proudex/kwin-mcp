@@ -1913,7 +1913,12 @@ def _serve(generation: int) -> None:
 
     def answer(line: bytes) -> None:
         try:
-            resp = _handle_request(json.loads(line))
+            request = json.loads(line)
+            if isinstance(request, dict) and request.get("op") in _ATSPI_OPS:
+                # Not at start: libatspi aborts the process when the a11y bus is
+                # unreachable, and a request that needs no AT-SPI must still work.
+                _subscribe_popups()
+            resp = _handle_request(request)
         except Exception as exc:
             resp = {"worker_error": f"{type(exc).__name__}: {exc}"}
         responses.write(json.dumps(resp) + "\n")
@@ -1927,7 +1932,6 @@ def _serve(generation: int) -> None:
     # worker idles in a GLib main loop that dispatches bus traffic as it arrives
     # and reads requests from a stdin watch.
     loop = GLib.MainLoop()
-    _subscribe_popups()
     fd = sys.stdin.fileno()
     pending = bytearray()
 
@@ -1951,15 +1955,21 @@ def _serve(generation: int) -> None:
 
 # The worker's event listener; kept referenced so it stays registered.
 _LISTENERS: list[Any] = []
+# Requests that read the AT-SPI tree; the first one subscribes to popup events.
+_ATSPI_OPS = frozenset({"query", "wait", "resolve", "action"})
+_SUBSCRIBE_TRIED: list[bool] = []
 
 
 def _subscribe_popups() -> None:
-    """Feed ``object:state-changed:showing`` events to the popup tracker.
+    """Feed ``object:state-changed:showing`` events to the popup tracker (once).
 
     The subscription makes applications emit showing changes on the bus, which
     the main loop dispatches between requests. Failing to subscribe only costs
     the popups, so it is not an error.
     """
+    if _SUBSCRIBE_TRIED:
+        return
+    _SUBSCRIBE_TRIED.append(True)
     try:
         listener = Atspi.EventListener.new(_on_showing)
         listener.register("object:state-changed:showing")
