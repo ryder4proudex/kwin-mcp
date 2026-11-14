@@ -763,7 +763,7 @@ note = "Engine skips the up-front check_typeable for method='keys' (core.py) and
 file = "src/kwin_mcp/core.py"
 search = '''
         if method == "keys":
-            check_typeable(text)
+            check_typeable(text, echo=echo)
         elif "\0" in text:'''
 replace = '''
         if method == "keys":

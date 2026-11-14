@@ -145,7 +145,7 @@ def _type(
 def _assert_rejected(probe: Probe, text: str, method: TypeMethod, message: str) -> None:
     mark = probe.mark()
     with pytest.raises(ValueError) as excinfo:
-        probe.engine.keyboard_type(text, method=method)
+        probe.engine.keyboard_type(text, method=method, echo=True)
     assert str(excinfo.value) == message
     assert probe.settle(since=mark) == [], (text, method)
 

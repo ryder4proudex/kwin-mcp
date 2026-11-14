@@ -2176,7 +2176,7 @@ class AutomationEngine:
         the length, so a typed password does not end up in the transcript.
         """
         if method == "keys":
-            check_typeable(text)
+            check_typeable(text, echo=echo)
         elif "\0" in text:
             # NUL can neither travel in wtype's argv nor be typed meaningfully.
             msg = "text must not contain NUL characters"

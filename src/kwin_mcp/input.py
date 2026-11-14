@@ -32,7 +32,7 @@ from kwin_mcp import progress
 
 # Protocol constants only; importing the helper module loads no C library.
 from kwin_mcp.clipboard import MAX_COPY_BYTES, READY_BUDGET_S, RESTORE_ROUNDTRIP_S
-from kwin_mcp.models import HeldInput, TypeRoute
+from kwin_mcp.models import HeldInput, TypeRoute, count
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -173,17 +173,34 @@ _CHAR_KEY_MAP["\t"] = (15, False)  # tab
 _CHAR_KEY_MAP["\n"] = (28, False)  # enter
 
 
-def check_typeable(text: str) -> None:
-    """Raise ValueError naming every character the US QWERTY key map cannot produce.
+def check_typeable(text: str, *, echo: bool = False) -> None:
+    """Raise ValueError if the US QWERTY key map cannot produce a character of ``text``.
 
     The single source of truth for what ``keyboard_type`` accepts, so callers can
-    reject unsupported text before touching any input backend.
+    reject unsupported text before touching any input backend. The message names
+    the characters only with ``echo``; otherwise it gives their positions, so a
+    rejected password does not reach the transcript.
     """
-    unsupported = dict.fromkeys(char for char in text if char not in _CHAR_KEY_MAP)
-    if unsupported:
-        chars = ", ".join(repr(char) for char in unsupported)
-        msg = f'keyboard_type cannot type {chars}.\nRetry with method="unicode".'
-        raise ValueError(msg)
+    positions = [i for i, char in enumerate(text, 1) if char not in _CHAR_KEY_MAP]
+    if not positions:
+        return
+    remedy = 'Retry with method="unicode".'
+    if echo:
+        chars = ", ".join(repr(char) for char in dict.fromkeys(text[i - 1] for i in positions))
+        msg = f"keyboard_type cannot type {chars}.\n{remedy}"
+    else:
+        shown = ", ".join(str(i) for i in positions[:_REJECTED_POSITIONS_SHOWN])
+        more = ", ..." if len(positions) > _REJECTED_POSITIONS_SHOWN else ""
+        where = "position" if len(positions) == 1 else "positions"
+        msg = (
+            f"keyboard_type cannot type {count(len(positions), 'character')} at {where} "
+            f"{shown}{more} (not echoed; echo=true names them).\n{remedy}"
+        )
+    raise ValueError(msg)
+
+
+_REJECTED_POSITIONS_SHOWN = 10
+_WTYPE_TIMEOUT_S = 5
 
 
 class HeldControlError(RuntimeError):
@@ -2039,10 +2056,19 @@ class InputBackend:
                     ["wtype", "--", text],
                     env=env,
                     capture_output=True,
-                    timeout=5,
+                    timeout=_WTYPE_TIMEOUT_S,
                 )
             except OSError:
                 result = None
+            except subprocess.TimeoutExpired:
+                # The exception carries the argv, i.e. the text: never let it out.
+                # wtype may have typed part of it, so do not paste it again.
+                msg = (
+                    f"wtype did not finish within {_WTYPE_TIMEOUT_S} s; some of the "
+                    f"{count(len(text), 'character')} may be typed.\n"
+                    "Check the focused field before typing again."
+                )
+                raise RuntimeError(msg) from None
             if result is not None and result.returncode == 0:
                 return TypeRoute(kind="wtype")
 

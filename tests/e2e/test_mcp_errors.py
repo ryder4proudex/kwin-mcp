@@ -191,7 +191,8 @@ async def _error_table(client: Client, after_each: Callable[[], Awaitable[None]]
         ) == (f"Stale ref {STALE_REF} (AT-SPI worker restarted); re-run element_query.",)
         await after_each()
         assert await _tool_error(client, "keyboard_type", {"text": "é"}) == (
-            "keyboard_type cannot type 'é'.",
+            "keyboard_type cannot type 1 character at position 1 "
+            "(not echoed; echo=true names them).",
             'Retry with method="unicode".',
         )
         await after_each()

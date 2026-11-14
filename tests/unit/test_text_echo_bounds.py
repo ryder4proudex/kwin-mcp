@@ -9,6 +9,7 @@ result reports the length alone.
 
 from __future__ import annotations
 
+import subprocess
 from typing import TYPE_CHECKING
 
 import pytest
@@ -140,7 +141,49 @@ def test_failed_unicode_typing_does_not_echo_the_text(
 def test_keyboard_type_rejects_unsupported_characters_without_a_session() -> None:
     """The key-map check runs before any session or input backend is looked up."""
     with pytest.raises(ValueError, match="'é', '€'") as excinfo:
-        AutomationEngine().keyboard_type("héllo€!")
+        AutomationEngine().keyboard_type("héllo€!", echo=True)
     assert str(excinfo.value) == (
         "keyboard_type cannot type 'é', '€'.\nRetry with method=\"unicode\"."
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "where"),
+    [
+        ("pässword", "1 character at position 2"),
+        ("é€ab€", "3 characters at positions 1, 2, 5"),
+        ("é" * 12, "12 characters at positions 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ..."),
+    ],
+)
+def test_rejected_characters_are_not_echoed_by_default(text: str, where: str) -> None:
+    with pytest.raises(ValueError) as excinfo:
+        AutomationEngine().keyboard_type(text)
+    message = str(excinfo.value)
+    assert message == (
+        f"keyboard_type cannot type {where} (not echoed; echo=true names them).\n"
+        'Retry with method="unicode".'
+    )
+    assert "é" not in message
+    assert "€" not in message
+
+
+def test_hung_wtype_does_not_echo_the_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kwin_mcp.input.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    def _hang(args: list[str], **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(args, 5)
+
+    monkeypatch.setattr(kwin_mcp.input.subprocess, "run", _hang)
+    backend = InputBackend.__new__(InputBackend)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        backend.keyboard_type_unicode("hunter2-sëcret", env={}, focused_class="x")
+
+    message = str(excinfo.value)
+    assert "hunter2" not in message
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__suppress_context__ is True
+    assert message == (
+        "wtype did not finish within 5 s; some of the 14 characters may be typed.\n"
+        "Check the focused field before typing again."
     )
