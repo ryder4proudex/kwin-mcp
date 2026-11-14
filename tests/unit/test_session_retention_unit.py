@@ -77,6 +77,10 @@ def harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Harness:
     runtime_dir.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime_dir))
+    # No accessibility launcher binds a socket here, and tmp_path alone can exceed
+    # the socket path limit (a long user name in /tmp/pytest-of-<user>, as in the
+    # Docker image), which would make every start refuse before the code under test.
+    monkeypatch.setattr(session_module, "_ATSPI_SOCKET_PATH_LIMIT", 4096)
     registry = OwnedProcessRegistry()
     monkeypatch.setattr(session_module, "process_registry", registry)
     observed = _Harness(registry=registry, temp_root=temp_root, runtime_dir=runtime_dir)
