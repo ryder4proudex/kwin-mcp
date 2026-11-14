@@ -1591,6 +1591,31 @@ def _alias_of(annotation: object) -> str | None:
     return None
 
 
+def _invalid_json_hint(arguments: dict[str, Any]) -> str | None:
+    """A remedy line for the first argument that looks like JSON but does not parse.
+
+    The MCP layer parses object and array arguments sent as valid JSON strings;
+    relaxed JSON such as ``{app_id:dolphin}`` reaches validation as a string and
+    is reported only as "Input should be a valid dictionary".
+    """
+    for key, value in arguments.items():
+        if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
+            continue
+        try:
+            json.loads(value)
+        except ValueError as exc:
+            reason = (
+                f"{exc.msg} at column {exc.colno}"
+                if isinstance(exc, json.JSONDecodeError)
+                else str(exc)
+            )
+            return (
+                f"Argument {key!r} is not valid JSON ({reason}); write objects as strict "
+                'JSON, e.g. {"key": "value"}.'
+            )
+    return None
+
+
 class KwinServer(MCPServer[dict[str, Any]]):
     """The kwin-mcp MCP server: 29 static tools over one ``AutomationEngine``."""
 
@@ -1797,7 +1822,13 @@ class KwinServer(MCPServer[dict[str, Any]]):
                 if key not in properties:
                     text = unknown_argument_text(name, key, properties)
                     raise ToolError(f"Error executing tool {name}: {text}")
-        return await super().call_tool(name, arguments, context)
+        try:
+            return await super().call_tool(name, arguments, context)
+        except ToolError as exc:
+            hint = _invalid_json_hint(arguments) if "validation error" in str(exc) else None
+            if hint is None:
+                raise
+            raise ToolError(f"{exc}\n{hint}") from exc
 
     # Resources and completion
 
