@@ -49,3 +49,13 @@ def test_other_validation_errors_get_no_json_remedy(fake_engine: FakeEngine) -> 
 
     assert "validation error" in text
     assert "not valid JSON" not in text
+
+
+@pytest.mark.qa("QA-GATE-010")
+def test_string_arguments_that_start_like_json_get_no_json_remedy(
+    fake_engine: FakeEngine,
+) -> None:
+    text = _error(fake_engine, "keyboard_type", {"text": "{hello", "method": "invalid"})
+
+    assert "validation error" in text
+    assert "not valid JSON" not in text

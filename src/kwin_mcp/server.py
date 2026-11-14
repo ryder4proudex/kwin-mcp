@@ -1591,15 +1591,40 @@ def _alias_of(annotation: object) -> str | None:
     return None
 
 
-def _invalid_json_hint(arguments: dict[str, Any]) -> str | None:
-    """A remedy line for the first argument that looks like JSON but does not parse.
+def _accepts_string(schema: _Schema, defs: _Schema) -> bool:
+    """Whether a JSON-schema property accepts a plain string value."""
+    if "$ref" in schema:
+        return _accepts_string(defs.get(str(schema["$ref"]).rsplit("/", 1)[-1], {}), defs)
+    kind = schema.get("type")
+    if kind == "string" or (isinstance(kind, list) and "string" in kind):
+        return True
+    if "enum" in schema and any(isinstance(item, str) for item in schema["enum"]):
+        return True
+    if isinstance(schema.get("const"), str):
+        return True
+    return any(
+        _accepts_string(option, defs)
+        for key in ("anyOf", "oneOf", "allOf")
+        for option in schema.get(key, ())
+    )
+
+
+def _invalid_json_hint(arguments: dict[str, Any], schema: _Schema | None) -> str | None:
+    """A remedy line for the first object or array argument sent as unparsable JSON.
 
     The MCP layer parses object and array arguments sent as valid JSON strings;
     relaxed JSON such as ``{app_id:dolphin}`` reaches validation as a string and
-    is reported only as "Input should be a valid dictionary".
+    is reported only as "Input should be a valid dictionary". Arguments whose
+    schema accepts a string (``keyboard_type.text``) are never blamed.
     """
+    if schema is None:
+        return None
+    properties: _Schema = schema.get("properties", {})
+    defs: _Schema = schema.get("$defs", {})
     for key, value in arguments.items():
         if not isinstance(value, str) or not value.lstrip().startswith(("{", "[")):
+            continue
+        if key not in properties or _accepts_string(properties[key], defs):
             continue
         try:
             json.loads(value)
@@ -1825,7 +1850,11 @@ class KwinServer(MCPServer[dict[str, Any]]):
         try:
             return await super().call_tool(name, arguments, context)
         except ToolError as exc:
-            hint = _invalid_json_hint(arguments) if "validation error" in str(exc) else None
+            hint = (
+                _invalid_json_hint(arguments, self._raw_schemas.get(name))
+                if "validation error" in str(exc)
+                else None
+            )
             if hint is None:
                 raise
             raise ToolError(f"{exc}\n{hint}") from exc
