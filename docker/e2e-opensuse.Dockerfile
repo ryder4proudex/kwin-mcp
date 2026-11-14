@@ -22,10 +22,14 @@ RUN zypper --non-interactive install --no-recommends python313 \
     && zypper clean --all
 
 WORKDIR /build
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
+# The dev tools (ruff, ty, pytest) come from uv.lock, so the image runs the
+# versions the repo's gate runs instead of the newest release.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv build --wheel --out-dir /build/dist
+    uv build --wheel --out-dir /build/dist \
+    && uv export --frozen --only-group dev --no-emit-project \
+        --output-file /build/dev-requirements.txt
 
 FROM ${TUMBLEWEED_IMAGE} AS runtime-base
 
@@ -98,7 +102,7 @@ RUN zypper --non-interactive install --no-recommends \
         python313-devel \
     && zypper clean --all
 
-COPY --from=wheel-builder /build/pyproject.toml /tmp/pyproject.toml
+COPY --from=wheel-builder /build/dev-requirements.txt /tmp/dev-requirements.txt
 COPY --from=wheel-builder /build/dist/ /tmp/wheels/
 RUN --mount=type=cache,target=/root/.cache/uv \
     python3 -m venv --system-site-packages /opt/kwin-mcp-venv \
@@ -107,7 +111,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         /tmp/wheels/*.whl \
     && uv pip install \
         --python /opt/kwin-mcp-venv/bin/python \
-        --group /tmp/pyproject.toml:dev
+        --requirement /tmp/dev-requirements.txt
 
 FROM runtime-base AS runtime
 ARG TUMBLEWEED_IMAGE
