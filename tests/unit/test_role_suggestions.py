@@ -82,16 +82,27 @@ class _NoChildren(Node):
         raise RuntimeError("org.freedesktop.DBus.Error.NoReply")
 
 
-@pytest.mark.parametrize("kind", ["node", "child"])
+class _VanishedChild(Node):
+    def get_child_at_index(self, index: int) -> Node | None:  # ty: ignore[invalid-method-override]
+        return None
+
+
+@pytest.mark.parametrize("kind", ["node", "child", "vanished child", "vanished top-level"])
 def test_walk_that_skipped_unreadable_nodes_proves_nothing(
     monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
     # The unreadable node may be the very element with the role.
+    app_cls: type[Node] = Node
     if kind == "node":
         frame = Node("Calculator", "frame", (0, 0, 400, 500), children=[_Unreadable("7")])
-    else:
+    elif kind == "child":
         frame = _NoChildren("Calculator", "frame", (0, 0, 400, 500), children=[Node("7")])
-    install(monkeypatch, [Node("calc", "application", children=[frame], pid=APP)], WINDOWS)
+    elif kind == "vanished child":
+        frame = _VanishedChild("Calculator", "frame", (0, 0, 400, 500), children=[Node("7")])
+    else:
+        frame = Node("Calculator", "frame", (0, 0, 400, 500))
+        app_cls = _VanishedChild
+    install(monkeypatch, [app_cls("calc", "application", children=[frame], pid=APP)], WINDOWS)
 
     response = _walk({"role": "button"})
 

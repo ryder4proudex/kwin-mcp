@@ -431,6 +431,8 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
                 limits.unreadable += 1
                 pids, mappings, toplevels = frozenset(), [], []
             mappings_by_app.setdefault(pids, []).extend(mappings)
+            # A top-level that vanished mid-walk may have held the elements sought.
+            limits.unreadable += sum(1 for toplevel in toplevels if toplevel is None)
             selected = [
                 (toplevel, mapping)
                 for toplevel, mapping in zip(toplevels, mappings, strict=True)
@@ -538,6 +540,8 @@ def _children(
             continue
         if child is not None:
             children.append(child)
+        elif limits is not None:
+            limits.unreadable += 1
     return children
 
 
