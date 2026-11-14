@@ -475,6 +475,37 @@ Known limits: `SIGKILL` runs no cleanup, so with `retention.artifacts=false` the
 
 `session_connect(observe=true)` attaches a read-only observer to a session that another process owns, for example a virtual session started by an agent. The observer opens no input backend (EIS) and no clipboard, and refuses `app_launch`, `element_act`, the window mutators and `dbus_call` with an `Observer session` error; it can list windows, query elements and capture the screen. `session_stop` on an observer only detaches: the owner's compositor and apps keep running, because an observer never launched anything. `enable_accessibility=true` is refused with `observe=true`, so an observer never changes the session.
 
+Screen capture by an observer needs KWin's ScreenShot2 in the observed session, which `kwin_wayland --virtual` answers from KWin 6.8. On older KWin an observer still lists windows and queries elements, but `screen_capture` fails with an error that names this requirement: only the session's owner can capture there, through its X11 display (`KWIN_MCP_X11_SCREENSHOT=1`).
+
+A complete example with two `kwin-mcp-cli` processes (two MCP clients work the same way). A owns a virtual session; B observes it, reads, and disconnects:
+
+```text
+# A: the owner
+kwin-mcp> session_start
+Session started. Wayland socket: wayland-mcp-12345-1700000000
+D-Bus: unix:path=/tmp/dbus-AbCdEf,guid=0123456789abcdef0123456789abcdef
+...
+kwin-mcp> app_launch command=konsole
+
+# B: an observer, given A's D-Bus address and Wayland socket (from A's session_start or session_info)
+kwin-mcp> session_connect observe=true dbus_address=unix:path=/tmp/dbus-AbCdEf,guid=0123456789abcdef0123456789abcdef wayland_display=wayland-mcp-12345-1700000000
+Connected to live KWin session. ...
+Observer: read-only (no input, clipboard or actions)
+Input backend: none
+kwin-mcp> window_list
+kwin-mcp> element_query locator='{"app": "konsole", "role": "frame"}'
+kwin-mcp> screen_capture
+kwin-mcp> pointer_click target='{"x": 10, "y": 10}'
+Error: Observer session: read-only (no input, clipboard, app launch, window or D-Bus actions).
+kwin-mcp> session_stop
+Disconnected from live session.
+
+# A: the session and konsole are still running; only the owner ends them
+kwin-mcp> session_info
+kwin-mcp> session_stop
+Session stopped.
+```
+
 `kwin-mcp-viewer` is a small GTK 4 window built on that observer. It polls `screen_capture` and shows the screen; it listens on no network port.
 
 ```bash
@@ -485,6 +516,8 @@ kwin-mcp-viewer --session-file owner.json --control-socket owner.sock
 ```
 
 The session file is JSON with `dbus_address` and `wayland_socket` (or `wayland_display`). Taking control is the owner's decision: with `--control-socket` the viewer speaks a one-line-JSON handoff protocol over that local Unix socket, and the owner runs any input itself.
+
+Arbitration is entirely the owner's responsibility: granting and expiring leases, pausing and resuming AI input, and releasing keys and buttons the AI still holds. kwin-mcp does not serve a control socket. It ships only the viewer side of the protocol, and the reference owner in `tests/e2e/test_observer.py` only records requests and runs `human_input`, so the tests cover the protocol transport, not an owner's lease logic. An owner that offers takeover must implement the duties below.
 
 | Request | Owner's duty |
 |---|---|
