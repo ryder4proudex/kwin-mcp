@@ -72,6 +72,33 @@ def test_incomplete_walk_proves_nothing() -> None:
     assert "role_suggestions" not in response["walk"]
 
 
+class _Unreadable(Node):
+    def get_role_name(self) -> str:
+        raise RuntimeError("org.freedesktop.DBus.Error.NoReply")
+
+
+class _NoChildren(Node):
+    def get_child_at_index(self, index: int) -> Node:
+        raise RuntimeError("org.freedesktop.DBus.Error.NoReply")
+
+
+@pytest.mark.parametrize("kind", ["node", "child"])
+def test_walk_that_skipped_unreadable_nodes_proves_nothing(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    # The unreadable node may be the very element with the role.
+    if kind == "node":
+        frame = Node("Calculator", "frame", (0, 0, 400, 500), children=[_Unreadable("7")])
+    else:
+        frame = _NoChildren("Calculator", "frame", (0, 0, 400, 500), children=[Node("7")])
+    install(monkeypatch, [Node("calc", "application", children=[frame], pid=APP)], WINDOWS)
+
+    response = _walk({"role": "button"})
+
+    assert response["result"] == []
+    assert "role_suggestions" not in response["walk"]
+
+
 def test_wait_reports_suggestions_too() -> None:
     response = accessibility._handle_request(
         {"op": "wait", "locator": {"role": "button"}, "timeout_ms": 0}

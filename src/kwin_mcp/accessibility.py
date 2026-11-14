@@ -318,13 +318,15 @@ class _WalkLimits:
     visited: int = 0
     truncated: str = ""
     deadline: float = 0.0
-    # Lowercased roles of the nodes read, for role suggestions.
+    # Lowercased roles of the nodes read, and how many nodes or child lists
+    # could not be read, for role suggestions.
     roles: set[str] = field(default_factory=set)
+    unreadable: int = 0
 
     def start(self) -> None:
         """Reset the counters and start the clock for a new walk."""
         self.visited, self.truncated = 0, ""
-        self.roles = set()
+        self.roles, self.unreadable = set(), 0
         self.deadline = time.monotonic() + self.time_budget_s
 
     def allows_depth(self, depth: int) -> bool:
@@ -346,13 +348,13 @@ class _WalkLimits:
     def report(self, criteria: _Criteria | None = None, found: int = 1) -> dict[str, Any]:
         """``visited`` and ``truncated``; ``role_suggestions`` when no node had the role.
 
-        A complete walk (every depth, not truncated) that found nothing for a
-        ``role`` no node in scope has gets ``role_suggestions``: the roles seen
-        that contain it or are close to it.
+        A complete walk (every depth, not truncated, every node readable) that
+        found nothing for a ``role`` no node in scope has gets
+        ``role_suggestions``: the roles seen that contain it or are close to it.
         """
         report: dict[str, Any] = {"visited": self.visited, "truncated": self.truncated}
         role = "" if criteria is None else criteria.role
-        complete = not self.truncated and self.max_depth is None
+        complete = not self.truncated and self.max_depth is None and not self.unreadable
         if role and not found and complete and role not in self.roles:
             report["role_suggestions"] = _close_roles(role, self.roles)
         return report
@@ -403,10 +405,11 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
     mappings_by_app: dict[frozenset[int], list[_WindowMapping]] = {}
     scales = _OutputScales()
     desktop = Atspi.get_desktop(0)
-    for app in _children(desktop):
+    for app in _children(desktop, limits=limits):
         try:
             app_name = app.get_name() or ""
         except Exception:
+            limits.unreadable += 1
             continue
         if not criteria.matches_app(app_name):
             continue
@@ -417,6 +420,7 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
         try:
             app_info = _extract_info(app, 0, limits.text_max_chars)
         except Exception:
+            limits.unreadable += 1
             continue
         selected: list[tuple[Atspi.Accessible, _WindowMapping]] = []
         if scoped or limits.allows_depth(1):
@@ -424,6 +428,7 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
                 pids, mappings, toplevels = _resolve_app(app, kwin_before, kwin_error)
             except Exception:
                 # Unscoped, the application node is still listed without its windows.
+                limits.unreadable += 1
                 pids, mappings, toplevels = frozenset(), [], []
             mappings_by_app.setdefault(pids, []).extend(mappings)
             selected = [
@@ -492,6 +497,7 @@ def _collect(
         try:
             info = _extract_info(element, depth, limits.text_max_chars)
         except Exception:
+            limits.unreadable += 1
             continue
         if scale == 1.0 and info.role == _WEB_DOCUMENT_ROLE and info.has_extents:
             rect = (info.x, info.y, info.width, info.height)
@@ -506,22 +512,29 @@ def _collect(
         if not limits.allows_depth(depth + 1):
             continue
         own_rect = (info.x, info.y, info.width, info.height) if info.has_extents else None
-        children = _children(element, info.children_count)
+        children = _children(element, info.children_count, limits)
         pending.extend((child, depth + 1, scale, own_rect) for child in reversed(children))
 
 
-def _children(element: Atspi.Accessible, count: int | None = None) -> list[Atspi.Accessible]:
-    """The readable children of ``element``; unreadable ones are left out."""
+def _children(
+    element: Atspi.Accessible, count: int | None = None, limits: _WalkLimits | None = None
+) -> list[Atspi.Accessible]:
+    """The readable children of ``element``; unreadable ones are left out (and
+    counted in ``limits.unreadable``)."""
     if count is None:
         try:
             count = element.get_child_count()
         except Exception:
+            if limits is not None:
+                limits.unreadable += 1
             return []
     children: list[Atspi.Accessible] = []
     for index in range(count):
         try:
             child = element.get_child_at_index(index)
         except Exception:
+            if limits is not None:
+                limits.unreadable += 1
             continue
         if child is not None:
             children.append(child)
