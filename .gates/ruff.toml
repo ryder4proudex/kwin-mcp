@@ -1,0 +1,10 @@
+# Ruff settings for the kit's own helpers in .gates/ (installed by repo-gates).
+# Ruff applies the closest config file to each file, so this file shields
+# .gates/*.py from the host repo's [tool.ruff] options (line-length, quote style,
+# rule selection). Without it, a host with e.g. line-length = 100 sees the kit
+# files as unformatted in its own `ruff format --check .`. Overwritten on reinstall.
+line-length = 88
+
+[format]
+quote-style = "double"
+indent-style = "space"

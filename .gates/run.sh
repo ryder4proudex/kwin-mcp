@@ -96,7 +96,7 @@ go_gate() {
         --disallowed_types=forbidden,restricted,reciprocal,unknown || bad "Go dependency licenses"
 }
 
-if [ -f Cargo.toml ] && touched '(\.rs|Cargo\.(toml|lock)|deny\.toml|rustfmt\.toml|\.yml)$'; then
+if [ -f Cargo.toml ] && touched '(\.rs|\.ftl|Cargo\.(toml|lock)|deny\.toml|rustfmt\.toml|\.yml)$'; then
     step "rust: fmt, clippy, test, cargo-deny"
     rust_gate
 fi
