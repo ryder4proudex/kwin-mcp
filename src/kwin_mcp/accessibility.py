@@ -771,15 +771,24 @@ def _strict_candidates(
                     entry = _RefEntry(element, role, app_name, depth, application, toplevel, scale)
                     candidates.append(_Candidate(entry, name, chosen))
 
-        try:
-            child_count = element.get_child_count()
-        except Exception as exc:
-            raise _IncompleteDiscoveryError(f"could not read child count: {exc}") from exc
-        for index in range(child_count):
+        if depth == 0:
+            # The application's real top-levels, without aliases (see _toplevels).
             try:
-                child = element.get_child_at_index(index)
+                children = _toplevels(element)
             except Exception as exc:
-                raise _IncompleteDiscoveryError(f"could not read child: {exc}") from exc
+                raise _IncompleteDiscoveryError(f"could not read top-levels: {exc}") from exc
+        else:
+            try:
+                child_count = element.get_child_count()
+            except Exception as exc:
+                raise _IncompleteDiscoveryError(f"could not read child count: {exc}") from exc
+            children = []
+            for index in range(child_count):
+                try:
+                    children.append(element.get_child_at_index(index))
+                except Exception as exc:
+                    raise _IncompleteDiscoveryError(f"could not read child: {exc}") from exc
+        for child in children:
             if child is not None:
                 child_toplevel = child if depth == 0 else toplevel
                 visit(child, application, app_name, child_toplevel, depth + 1, scale, element)
@@ -1152,9 +1161,7 @@ def _resolve_app(
     except Exception:
         pid = None
 
-    children: list[_AccessibleTopLevel | None] = []
-    for j in range(app.get_child_count()):
-        children.append(app.get_child_at_index(j))
+    children = _toplevels(app)
 
     def _unmapped(reason: str) -> list[_WindowMapping]:
         return [_WindowMapping(None, reason) for _ in children]
@@ -1204,6 +1211,46 @@ def _resolve_app(
                 mapping.anchor[1] - mapping.rect[1],
             )
     return pids, mappings, children
+
+
+def _toplevels(app: _AccessibleApp) -> list[_AccessibleTopLevel | None]:
+    """The application's real top-levels: the nodes whose parent is ``app``.
+
+    Qt lists every top-level QWindow as a child of its application, including
+    the offscreen QQuickWindow of a QQuickWidget, whose content is also part of
+    the widget's own subtree (System Settings, Info Center): that child's parent
+    is a node inside another top-level, so it is an alias and left out, and its
+    content is walked once, under the window that shows it. A child that
+    vanished stays as None, for the caller's window-set check.
+    """
+    listed = [app.get_child_at_index(j) for j in range(app.get_child_count())]
+    toplevels = [child for child in listed if child is None or not _is_alias(child, app, listed)]
+    return toplevels
+
+
+def _is_alias(
+    child: _AccessibleTopLevel, app: _AccessibleApp, listed: Sequence[object | None]
+) -> bool:
+    """Whether ``child``'s parent chain reaches ``app`` through another listed child.
+
+    Unreadable or broken chains keep the child: leaving out a real top-level
+    would hide its elements, while keeping an alias only shows them twice.
+    """
+    node: Any = child
+    for _ in range(_ACTION_SEARCH_MAX_DEPTH):
+        try:
+            parent = node.get_parent()
+        except Exception:
+            return False
+        if parent is None:
+            return False
+        if parent == app:
+            return node is not child and any(
+                sibling is not None and sibling is not child and sibling == node
+                for sibling in listed
+            )
+        node = parent
+    return False
 
 
 def _match_toplevel(
