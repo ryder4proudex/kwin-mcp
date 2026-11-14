@@ -49,6 +49,11 @@ KeyChord = str
 ECHO_MAX_CHARS = 200
 
 
+def count(n: int, noun: str) -> str:
+    """``n`` with ``noun``, plural unless ``n`` is 1: ``1 element``, ``2 elements``."""
+    return f"{n} {noun}" if n == 1 else f"{n} {noun}s"
+
+
 def text_echo(text: str) -> str:
     """Echo caller text in a result: its repr, or ``<N characters>`` when long."""
     if len(text) <= ECHO_MAX_CHARS:
@@ -513,7 +518,7 @@ class ElementList(BaseModel):
         else:
             reason = "the time budget"
         return (
-            f"TRUNCATED: the walk stopped at {reason} after {self.visited} nodes; "
+            f"TRUNCATED: the walk stopped at {reason} after {count(self.visited, 'node')}; "
             "narrow locator.app or max_depth, or raise max_nodes."
         )
 
@@ -522,7 +527,7 @@ class ElementList(BaseModel):
         matching = "" if self.locator.is_empty() else f" matching {self.locator.describe()}"
         if self.output_file is not None:
             return (
-                f"Wrote {self.output_count} elements{matching}{scope} as JSONL to "
+                f"Wrote {count(self.output_count, 'element')}{matching}{scope} as JSONL to "
                 f"{self.output_file} ({self.output_bytes} bytes)."
             )
         if not self.elements and self.omitted:
@@ -536,11 +541,11 @@ class ElementList(BaseModel):
         if self.locator.is_empty():
             if not self.elements:
                 return "(no accessible applications found)"
-            header = f"# Accessibility Tree{scope} ({len(self.elements)} elements)\n"
+            header = f"# Accessibility Tree{scope} ({count(len(self.elements), 'element')})\n"
         else:
             if not self.elements:
                 return f"No elements found{matching}"
-            header = f"Found {len(self.elements)} elements{matching}{scope}:\n"
+            header = f"Found {count(len(self.elements), 'element')}{matching}{scope}:\n"
         return "\n".join([header, *_element_lines(self.elements)])
 
     def render(self) -> str:
@@ -1271,7 +1276,7 @@ class AppLogResult(BaseModel):
     def render(self) -> str:
         header = f"App log of PID {self.pid}: {self.log_path}"
         if self.truncated:
-            header += f" (last {len(self.lines)} lines)"
+            header += f" (last {count(len(self.lines), 'line')})"
         body = "\n".join(self.lines) if self.lines else "(no log output yet)"
         return f"{header}\n{body}"
 

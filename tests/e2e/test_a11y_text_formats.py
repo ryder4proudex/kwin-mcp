@@ -53,8 +53,8 @@ _TAGS = re.compile(
     r" \[ref=e\d+\.\d+(?:, children=\d+)?(?:, app=(?:'[^']*'|\"[^\"]*\"))?"
     r"(?:, window=(?:none|\{[0-9a-f-]+\}))?\]$"
 )
-_TREE_HEADER = re.compile(r"# Accessibility Tree \((\d+) elements\)")
-_FOUND_HEADER = re.compile(r"Found (\d+) elements matching (.+):")
+_TREE_HEADER = re.compile(r"# Accessibility Tree \((\d+) elements?\)")
+_FOUND_HEADER = re.compile(r"Found (\d+) elements? matching (.+):")
 # One 0.11 tree line: two spaces per depth, role, name, states, then the extents.
 _TREE_LINE = re.compile(
     r"(?P<indent>(?:  )*)- \[(?P<role>[^\]]+)\] \"(?P<name>[^\"]*)\" \((?P<states>[a-z, -]*)\) "

@@ -833,7 +833,7 @@ GOLDENS = [
             wait=ElementWaitResult(until="absent", timeout_ms=0, satisfied=False, elapsed_ms=40),
         ),
         "NOT SATISFIED: Timeout after 0 ms (until=absent, elapsed 40 ms)\n"
-        "Found 1 elements matching query='7', states=['focused']:\n\n"
+        "Found 1 element matching query='7', states=['focused']:\n\n"
         '      - [push button] "7" (focused) @ screen (10, 20, 30x40) [actions: Press]'
         " [ref=e1.6, app='kcalc', window={w1}]",
         id="element-list-wait-absent-timeout",
@@ -846,7 +846,7 @@ GOLDENS = [
                 until="present", timeout_ms=5000, satisfied=True, elapsed_ms=120
             ),
         ),
-        "Found 1 elements matching query='7':\n\n"
+        "Found 1 element matching query='7':\n\n"
         '  - [frame] "7" (enabled, visible) @ screen (10, 20, 30x40)'
         " [ref=e1.6, app='kcalc', window={w1}]\n"
         "Wait satisfied (until=present) after 120 ms",
