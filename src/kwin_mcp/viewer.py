@@ -220,7 +220,9 @@ class Handoff:
     queued under one takeover is never sent under a later one. Every request runs
     under one lock together with the state check before it and the state change
     after it: a release or a new takeover waits for an input call in flight, and a
-    late failure of an old request can never clear a newer takeover.
+    late failure of an old request can never clear a newer takeover. From the moment a
+    give-back is asked for, no further input is accepted or sent: only the call already
+    in flight finishes before the release.
     """
 
     def __init__(
@@ -236,6 +238,8 @@ class Handoff:
         # heartbeats (and closing) never wait behind a slow input call.
         self._io = threading.RLock()
         self._state = threading.Lock()
+        # Give-backs waiting for the input lock; while any is, input is refused.
+        self._releasing = 0
 
     def _lose(self, generation: int | None = None) -> None:
         """Drop control (only if still in ``generation``, when given)."""
@@ -247,6 +251,12 @@ class Handoff:
     def _current(self) -> int | None:
         with self._state:
             return self.generation if self.holding else None
+
+    def input_generation(self) -> int | None:
+        """The generation input is accepted in: None without control or once a give-back
+        has been asked for (the release only waits for the call already in flight)."""
+        with self._state:
+            return self.generation if self.holding and not self._releasing else None
 
     def take(self) -> dict[str, Any]:
         """Take control: the owner pauses the AI and releases its held input."""
@@ -280,11 +290,17 @@ class Handoff:
         """
         if self._current() is None:
             return
-        with self._io:
-            if self._current() is None:
-                return
-            self._lose()
-            self.client.request("release", holder=self.holder)
+        with self._state:
+            self._releasing += 1  # queued and newly made input is dropped from now on
+        try:
+            with self._io:
+                if self._current() is None:
+                    return
+                self._lose()
+                self.client.request("release", holder=self.holder)
+        finally:
+            with self._state:
+                self._releasing -= 1
 
     def abandon(self) -> None:
         """Return control without waiting for input in flight (the viewer is closing).
@@ -302,7 +318,7 @@ class Handoff:
     ) -> dict[str, Any]:
         """Ask the owner to run one input tool for this holder (in ``generation``, if given)."""
         with self._io:
-            current = self._current()
+            current = self.input_generation()
             if current is None or (generation is not None and generation != current):
                 msg = "take control first: input goes to the session only while you hold the lease"
                 raise ViewerError(msg, "not_holder")
@@ -318,7 +334,8 @@ class InputQueue:
     """Sends the human's input to the owner one call at a time, in the order it happened.
 
     Each event is stamped with the takeover generation it was made in; events left
-    over from an earlier takeover (given back, lost, or taken again) are dropped.
+    over from an earlier takeover (given back, lost, or taken again) are dropped, and
+    so are events still queued when a give-back is asked for.
     """
 
     def __init__(self, handoff: Handoff, on_error: Callable[[str], None]) -> None:
@@ -329,10 +346,12 @@ class InputQueue:
         self._thread.start()
 
     def submit(self, tool: str, args: dict[str, Any]) -> bool:
-        """Queue one input call; False when control is not held (nothing queued)."""
-        if not self.handoff.holding:
+        """Queue one input call; False when control is not held or is being given back
+        (nothing queued)."""
+        generation = self.handoff.input_generation()
+        if generation is None:
             return False
-        self._q.put((self.handoff.generation, tool, args))
+        self._q.put((generation, tool, args))
         return True
 
     def _run(self) -> None:
@@ -341,7 +360,7 @@ class InputQueue:
             if item is None:
                 return
             generation, tool, args = item
-            if not self.handoff.holding or generation != self.handoff.generation:
+            if generation != self.handoff.input_generation():
                 continue
             try:
                 self.handoff.send(tool, args, generation)

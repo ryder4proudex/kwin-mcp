@@ -259,6 +259,7 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         client.entered.wait(5)  # "a" is in flight
         inputs.submit("keyboard_press", {"keys": "Return"})  # queued behind it
         retake = _give_back_and_take(handoff)  # a quick new takeover, from the GTK side
+        assert not inputs.submit("keyboard_type", {"text": "b"})  # made after the give-back
         client.gate.set()
         retake.join(5)
         _wait(lambda: inputs._q.empty())
@@ -271,7 +272,7 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         ("human_input", "keyboard_type"),
         ("release", None),
         ("takeover", None),
-    ]  # the stale Return was dropped
+    ]  # the stale Return (queued before the give-back) was dropped
     assert not inputs.submit("x", {}) or handoff.holding
 
 
@@ -282,7 +283,8 @@ def _give_back_and_take(handoff: Handoff) -> threading.Thread:
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
-    time.sleep(0.1)
+    # The give-back has been asked for and waits for the input call in flight.
+    _wait(lambda: handoff.input_generation() is None)
     return t
 
 
