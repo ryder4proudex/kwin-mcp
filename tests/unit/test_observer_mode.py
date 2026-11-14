@@ -68,7 +68,10 @@ def observer(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Automa
         )
         yield engine
     finally:
-        engine._session = None
+        # Detach for real: it removes the artifacts dir session_connect created
+        # in the temp dir, which dropping the session object would leak.
+        if engine._session is not None:
+            engine.session_stop()
         listener.close()
 
 
