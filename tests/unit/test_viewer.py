@@ -252,7 +252,8 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
     client = GatedClient()
     handoff = Handoff(cast("ControlClient", client), "human:test")
     handoff.take()
-    inputs = InputQueue(handoff, lambda _note: None)
+    errors: list[str] = []
+    inputs = InputQueue(handoff, errors.append)
     try:
         client.gate = threading.Event()
         inputs.submit("keyboard_type", {"text": "a"})
@@ -273,7 +274,24 @@ def test_queued_input_never_crosses_into_a_new_takeover() -> None:
         ("release", None),
         ("takeover", None),
     ]  # the stale Return (queued before the give-back) was dropped
+    assert errors == []  # silently: the human gave control back, nothing failed
     assert not inputs.submit("x", {}) or handoff.holding
+
+
+def test_stamped_input_from_an_ended_takeover_is_refused_as_stale() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    with pytest.raises(ViewerError) as exc:
+        handoff.send("keyboard_type", {"text": "a"})
+    assert exc.value.code == "not_holder"  # unstamped input without control
+    handoff.take()
+    old = handoff.input_generation()
+    handoff.give_back()
+    handoff.take()
+    with pytest.raises(ViewerError) as exc:
+        handoff.send("keyboard_type", {"text": "a"}, old)
+    assert exc.value.code == "stale_input"  # InputQueue drops it without an error note
+    assert [op for op, _ in client.requests] == ["takeover", "release", "takeover"]
 
 
 def _give_back_and_take(handoff: Handoff) -> threading.Thread:

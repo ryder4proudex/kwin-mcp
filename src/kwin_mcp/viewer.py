@@ -316,12 +316,17 @@ class Handoff:
     def send(
         self, tool: str, args: dict[str, Any], generation: int | None = None
     ) -> dict[str, Any]:
-        """Ask the owner to run one input tool for this holder (in ``generation``, if given)."""
+        """Ask the owner to run one input tool for this holder (in ``generation``, if given).
+
+        Input stamped with a ``generation`` that is over (given back, lost or taken again)
+        is refused with code ``stale_input``; unstamped input without control, with
+        ``not_holder``.
+        """
         with self._io:
             current = self.input_generation()
             if current is None or (generation is not None and generation != current):
                 msg = "take control first: input goes to the session only while you hold the lease"
-                raise ViewerError(msg, "not_holder")
+                raise ViewerError(msg, "not_holder" if generation is None else "stale_input")
             try:
                 return self.client.request("human_input", holder=self.holder, tool=tool, args=args)
             except ViewerError as exc:
@@ -365,7 +370,8 @@ class InputQueue:
             try:
                 self.handoff.send(tool, args, generation)
             except ViewerError as exc:
-                self._on_error(f"{tool}: {exc}")
+                if exc.code != "stale_input":  # dropped like the check above, not an error
+                    self._on_error(f"{tool}: {exc}")
 
     def close(self, timeout: float = 5.0) -> None:
         self._q.put(None)
