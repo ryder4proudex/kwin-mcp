@@ -8,8 +8,10 @@ exercised by ``tests/e2e/test_atspi_runtime_isolation.py``.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shlex
+import signal
 import stat
 import subprocess
 from typing import TYPE_CHECKING
@@ -117,6 +119,7 @@ def _run_switch_and_restore(
     switch = script[script.index("ATSPI_RUNTIME_DIR=") : script.index("ATSPI_UP=1\n")]
     restore_at = script.index(_RESTORE)
     restore = script[restore_at : script.index("\nfi\n", restore_at) + len("\nfi\n")]
+    trap = script[script.index("cleanup() {") : script.index("trap cleanup EXIT TERM INT HUP\n")]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "calls.log"
@@ -130,10 +133,21 @@ def _run_switch_and_restore(
     env["STUB_FAIL_ON"] = fail_on
     if host_runtime_dir is not None:
         env["XDG_RUNTIME_DIR"] = host_runtime_dir
-    body = f"{switch}echo SWITCHED\n{restore}echo RESTORED\n"
-    return subprocess.run(
-        ["bash", "-c", body], env=env, capture_output=True, text=True, check=False, timeout=10
+    # A long-lived background child stands in for directly started AT-SPI
+    # helpers: an early exit must not wait for it.
+    helper = tmp_path / "helper.pid"
+    body = (
+        f"{trap}trap cleanup EXIT\n"
+        f"sleep 30 </dev/null >/dev/null 2>&1 &\necho $! > {shlex.quote(str(helper))}\n"
+        f"{switch}echo SWITCHED\n{restore}echo RESTORED\n"
     )
+    try:
+        return subprocess.run(
+            ["bash", "-c", body], env=env, capture_output=True, text=True, check=False, timeout=5
+        )
+    finally:
+        with contextlib.suppress(OSError, ValueError):
+            os.kill(int(helper.read_text()), signal.SIGKILL)
 
 
 def test_switch_and_restore_point_activation_back_at_the_host_dir(tmp_path: Path) -> None:
@@ -152,14 +166,14 @@ def test_failed_switch_refuses_to_activate_the_launcher(tmp_path: Path) -> None:
         tmp_path, host_runtime_dir="/run/host-rt", fail_on="kwin-mcp-a11y-unit"
     )
     assert result.returncode == 1
-    assert "SWITCHED" not in result.stdout
+    assert result.stdout.split() == ["FAILED"]
     assert "refusing to activate it in the shared one" in result.stderr
 
 
 def test_failed_restore_stops_the_session(tmp_path: Path) -> None:
     result = _run_switch_and_restore(tmp_path, host_runtime_dir="/run/host-rt", fail_on="host-rt")
     assert result.returncode == 1
-    assert "RESTORED" not in result.stdout
+    assert result.stdout.split() == ["SWITCHED", "FAILED"]
     assert "could not restore XDG_RUNTIME_DIR" in result.stderr
 
 
@@ -169,5 +183,6 @@ def test_unset_host_runtime_dir_stops_before_the_switch(
 ) -> None:
     result = _run_switch_and_restore(tmp_path, host_runtime_dir=host_runtime_dir)
     assert result.returncode == 1
+    assert result.stdout.split() == ["FAILED"]
     assert "XDG_RUNTIME_DIR is not set" in result.stderr
     assert not (tmp_path / "calls.log").exists()
