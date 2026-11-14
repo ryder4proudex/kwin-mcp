@@ -69,9 +69,19 @@ def _kcalc_binary(nodes: list[AtspiNode]) -> str | None:
 
 
 def _wait_for_binary(oracle: AtspiOracle, expected: str) -> None:
-    oracle.wait_for(
-        lambda nodes: _kcalc_binary(nodes) == expected, app="kcalc", timeout_s=DISPLAY_TIMEOUT_S
-    )
+    """Wait until KCalc's binary display reads ``expected``; name the last reading if not."""
+    readings: list[str | None] = []
+
+    def shows_expected(nodes: list[AtspiNode]) -> bool:
+        readings.append(_kcalc_binary(nodes))
+        return readings[-1] == expected
+
+    try:
+        oracle.wait_for(shows_expected, app="kcalc", timeout_s=DISPLAY_TIMEOUT_S)
+    except AssertionError as error:
+        last = readings[-1] if readings else None
+        msg = f"KCalc binary display never read {expected!r}; last reading {last!r}"
+        raise AssertionError(msg) from error
 
 
 def _assert_binary_stays(oracle: AtspiOracle, expected: str) -> None:
@@ -194,8 +204,15 @@ def test_element_act_spoken_match_on_kcalc(kcalc_session: AutomationEngine) -> N
 
 @pytest.mark.qa("QA-ELEM-046")
 def test_element_act_fallback_actions_on_kcalc(kcalc_session: AutomationEngine) -> None:
-    """An unavailable first action falls back to Press and reports the invoked action."""
-    for fallback in ("click|Press", ["click", "Press"]):
+    """An unavailable first action falls back to Press and reports the invoked action.
+
+    Each press is checked on the display before the next one: Qt's Press action
+    is ``QAbstractButton::animateClick()``, which clicks when a 100 ms timer
+    expires and only restarts that timer when pressed again before then, so two
+    presses in quick succession are one click (7, not 77).
+    """
+    oracle = AtspiOracle(_session_dbus(kcalc_session))
+    for fallback, display in (("click|Press", "111"), (["click", "Press"], "1001101")):
         result = kcalc_session.element_act(
             StrictAddr(strict=Locator(query="seven", app="kcalc", match="exact")),
             fallback,
@@ -204,7 +221,7 @@ def test_element_act_fallback_actions_on_kcalc(kcalc_session: AutomationEngine) 
         assert result.dispatch == "confirmed", result
         assert result.element is not None and result.element.name == "Seven", result
         assert result.summary().startswith("Invoked AT-SPI action: Press on "), result.render()
-    _wait_for_binary(AtspiOracle(_session_dbus(kcalc_session)), "1001101")
+        _wait_for_binary(oracle, display)
 
 
 # ── Incomplete-discovery refusal (fake AT-SPI, no session needed) ────────
