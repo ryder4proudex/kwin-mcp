@@ -85,6 +85,7 @@ def test_usage_lists_every_flag() -> None:
         "--live-consent {elicit,refuse}",
         "--idle-exit SECONDS",
         "--detach-live-on-exit",
+        "--element-query-max-bytes N",
     ):
         assert flag in usage, flag
     assert usage.rstrip().endswith("Documentation: https://github.com/isac322/kwin-mcp#readme")
@@ -97,4 +98,5 @@ def test_usage_lists_every_flag() -> None:
         "--live-consent",
         "--idle-exit",
         "--detach-live-on-exit",
+        "--element-query-max-bytes",
     ]

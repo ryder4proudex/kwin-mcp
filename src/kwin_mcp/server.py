@@ -86,6 +86,7 @@ from kwin_mcp.core import (
 from kwin_mcp.input import abort_waits
 from kwin_mcp.models import (
     ANY_ELEMENT,
+    DEFAULT_ELEMENT_QUERY_MAX_BYTES,
     DEFAULT_MAX_NODES,
     DEFAULT_TEXT_MAX_CHARS,
     NO_RETENTION,
@@ -160,6 +161,8 @@ class ServerFlags:
     # Exits without session_stop (stdin EOF, signals) detach a live session instead
     # of stopping it; the idle exit always detaches.
     detach_live_on_exit: bool = False
+    # Byte budget of the elements element_query returns inline; 0 = no cap.
+    element_query_max_bytes: int = DEFAULT_ELEMENT_QUERY_MAX_BYTES
 
 
 def _max_edge_value(text: str) -> int:
@@ -179,12 +182,21 @@ def _idle_exit_value(text: str) -> int:
     return int(text)
 
 
+def _byte_count_value(text: str) -> int:
+    """Parse an ``--element-query-max-bytes`` value: ASCII bytes, 0 meaning no cap."""
+    if re.fullmatch(r"[0-9]+", text) is None:
+        msg = f"needs a number of bytes (0 = no cap), got {text!r}"
+        raise argparse.ArgumentTypeError(msg)
+    return int(text)
+
+
 def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     """Parse the server flags in ``argv`` (``sys.argv[1:]``); ``-h``/``--help`` is not one.
 
     ``main`` answers help before this runs. An unknown option, an abbreviation, a
     positional argument, an invalid or repeated ``--screenshot-max-edge``,
-    ``--live-consent`` or ``--idle-exit``, or one of them without a value is a usage error:
+    ``--live-consent``, ``--idle-exit`` or ``--element-query-max-bytes``, or one of them
+    without a value is a usage error:
     argparse prints the usage and the error to stderr and exits 2.
     """
     parser = argparse.ArgumentParser(prog="kwin-mcp", add_help=False, allow_abbrev=False)
@@ -194,6 +206,9 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     parser.add_argument("--live-consent", choices=("elicit", "refuse"), action="append")
     parser.add_argument("--idle-exit", type=_idle_exit_value, action="append", metavar="SECONDS")
     parser.add_argument("--detach-live-on-exit", action="store_true")
+    parser.add_argument(
+        "--element-query-max-bytes", type=_byte_count_value, action="append", metavar="N"
+    )
     args = parser.parse_args(list(argv))
     edges: list[int] = args.screenshot_max_edge or []
     if len(edges) > 1:
@@ -204,6 +219,9 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
     idle_exits: list[int] = args.idle_exit or []
     if len(idle_exits) > 1:
         parser.error("--idle-exit may only be specified once")
+    budgets: list[int] = args.element_query_max_bytes or []
+    if len(budgets) > 1:
+        parser.error("--element-query-max-bytes may only be specified once")
     return ServerFlags(
         default_live_session=args.default_live_session,
         screenshot_images=args.screenshot_images,
@@ -211,6 +229,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
         live_consent=consents[0] if consents else "elicit",
         idle_exit=idle_exits[0] if idle_exits else 0,
         detach_live_on_exit=args.detach_live_on_exit,
+        element_query_max_bytes=budgets[0] if budgets else DEFAULT_ELEMENT_QUERY_MAX_BYTES,
     )
 
 
@@ -219,7 +238,7 @@ def _parse_argv(argv: Sequence[str]) -> ServerFlags:
 _USAGE = """\
 usage: kwin-mcp [-h] [--default-live-session] [--screenshot-images] [--screenshot-max-edge N]
                 [--live-consent {elicit,refuse}] [--idle-exit SECONDS]
-                [--detach-live-on-exit]
+                [--detach-live-on-exit] [--element-query-max-bytes N]
 
 kwin-mcp: MCP server for GUI automation on KDE Plasma 6 Wayland.
 
@@ -253,6 +272,11 @@ options:
   --detach-live-on-exit   on stdin EOF or SIGTERM/SIGHUP/SIGINT, detach a live
                           session like --idle-exit instead of stopping it
                           (session_stop still stops it)
+  --element-query-max-bytes N
+                          return at most N bytes of element JSON inline from
+                          element_query (65536 by default, 0 = no cap); the reply
+                          says how many matches it left out; output_file is never
+                          capped; may be given once
 
 Documentation: https://github.com/isac322/kwin-mcp#readme
 """
@@ -1944,11 +1968,15 @@ def build_server(argv: Sequence[str] = (), *, engine: AutomationEngine | None = 
     """Build the server for the command-line flags ``argv`` (no ``-h``/``--help``).
 
     A usage error exits 2 like ``kwin-mcp`` itself. ``engine`` defaults to a new
-    ``AutomationEngine`` honouring ``--screenshot-max-edge``.
+    ``AutomationEngine`` honouring ``--screenshot-max-edge`` and
+    ``--element-query-max-bytes``.
     """
     flags = _parse_argv(argv)
     if engine is None:
-        engine = AutomationEngine(screenshot_max_edge=flags.screenshot_max_edge)
+        engine = AutomationEngine(
+            screenshot_max_edge=flags.screenshot_max_edge,
+            element_query_max_bytes=flags.element_query_max_bytes,
+        )
     return KwinServer(engine, flags)
 
 

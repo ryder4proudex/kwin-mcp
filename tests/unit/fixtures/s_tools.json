@@ -326,7 +326,9 @@
     "window_ids",
     "output_file",
     "output_count",
-    "output_bytes"
+    "output_bytes",
+    "omitted",
+    "inline_max_bytes"
    ]
   },
   {

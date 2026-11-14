@@ -464,6 +464,11 @@ DEFAULT_MAX_NODES = 20_000
 # through it), so a tree dump stays readable; element_query can lift it.
 DEFAULT_TEXT_MAX_CHARS = 200
 
+# Default byte budget for the elements element_query returns inline (their JSON),
+# so a broad query on a large web page cannot flood the caller; output_file is
+# not capped. 0 = no cap.
+DEFAULT_ELEMENT_QUERY_MAX_BYTES = 65536
+
 # Why a walk stopped before reading every node in its scope.
 WalkTruncation = Literal["max_nodes", "time"]
 
@@ -476,6 +481,8 @@ class ElementList(BaseModel):
     ``window_ids`` are the KWin windows a scoped walk was limited to. With
     ``output_file`` the elements were written there as JSONL instead
     (``output_count`` lines, ``output_bytes`` bytes) and ``elements`` is empty.
+    ``omitted`` counts the matching elements left out because their JSON did
+    not fit the ``inline_max_bytes`` budget; ``elements`` keeps the first ones.
     """
 
     locator: Locator = Field(default_factory=Locator)
@@ -488,6 +495,17 @@ class ElementList(BaseModel):
     output_file: str | None = None
     output_count: int = 0
     output_bytes: int = 0
+    omitted: int = 0
+    inline_max_bytes: int = 0
+
+    def _capped_line(self) -> str:
+        kept = len(self.elements)
+        return (
+            f"OUTPUT CAPPED: returned the first {kept} of {kept + self.omitted} matching "
+            f"elements ({self.inline_max_bytes}-byte inline budget).\n"
+            'Narrow the query (window, locator role/query, states: ["showing"]) or pass '
+            "output_file=/abs/path.jsonl to get all of them."
+        )
 
     def _truncation_line(self) -> str:
         if self.truncated == "max_nodes":
@@ -507,6 +525,8 @@ class ElementList(BaseModel):
                 f"Wrote {self.output_count} elements{matching}{scope} as JSONL to "
                 f"{self.output_file} ({self.output_bytes} bytes)."
             )
+        if not self.elements and self.omitted:
+            return f"Returned no elements{matching}{scope}: the first one alone exceeds the budget."
         if not self.elements and self.window_ids:
             return (
                 f"No elements found{matching}{scope}. A window whose AT-SPI top-level "
@@ -530,6 +550,8 @@ class ElementList(BaseModel):
         satisfied wait reports its elapsed time last.
         """
         parts = [self._listing()]
+        if self.omitted:
+            parts.append(self._capped_line())
         if self.truncated is not None:
             parts.append(self._truncation_line())
         if self.wait is not None:

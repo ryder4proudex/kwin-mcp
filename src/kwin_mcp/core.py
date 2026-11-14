@@ -41,6 +41,7 @@ from kwin_mcp.input import (
 )
 from kwin_mcp.models import (
     ANY_ELEMENT,
+    DEFAULT_ELEMENT_QUERY_MAX_BYTES,
     DEFAULT_MAX_NODES,
     DEFAULT_TEXT_MAX_CHARS,
     NO_RETENTION,
@@ -396,6 +397,24 @@ def _walk_fields(walk: object, max_nodes: int) -> dict[str, Any]:
     }
 
 
+def _capped(result: ElementList, budget: int) -> ElementList:
+    """``result`` keeping the first elements whose JSON fits ``budget`` bytes (0 = all)."""
+    if budget <= 0:
+        return result
+    used = 0
+    for kept, element in enumerate(result.elements):
+        used += len(element.model_dump_json().encode())
+        if used > budget:
+            return result.model_copy(
+                update={
+                    "elements": result.elements[:kept],
+                    "omitted": len(result.elements) - kept,
+                    "inline_max_bytes": budget,
+                }
+            )
+    return result
+
+
 def _check_output_file(path: str) -> Path:
     """Validate an element_query ``output_file`` before any walk runs."""
     target = Path(path)
@@ -464,11 +483,20 @@ class AutomationEngine:
     a ``capture`` option can override it.
     """
 
-    def __init__(self, screenshot_max_edge: int = 0) -> None:
+    def __init__(
+        self,
+        screenshot_max_edge: int = 0,
+        element_query_max_bytes: int = DEFAULT_ELEMENT_QUERY_MAX_BYTES,
+    ) -> None:
         if screenshot_max_edge < 0:
             msg = f"screenshot_max_edge must be 0 or positive, got {screenshot_max_edge}"
             raise ValueError(msg)
+        if element_query_max_bytes < 0:
+            msg = f"element_query_max_bytes must be 0 or positive, got {element_query_max_bytes}"
+            raise ValueError(msg)
         self._screenshot_max_edge = screenshot_max_edge
+        # Byte budget of the elements element_query returns inline; 0 = no cap.
+        self._element_query_max_bytes = element_query_max_bytes
         self._session: Session | LiveSession | None = None
         self._input: InputBackend | None = None
         self._clipboard_enabled: bool = False
@@ -1447,11 +1475,10 @@ class AutomationEngine:
         )
         return self._written(waited, target)
 
-    @staticmethod
-    def _written(result: ElementList, target: Path | None) -> ElementList:
-        """``result`` as returned, or with its elements moved to the JSONL ``target``."""
+    def _written(self, result: ElementList, target: Path | None) -> ElementList:
+        """``result`` capped to the inline budget, or its elements moved to the JSONL ``target``."""
         if target is None:
-            return result
+            return _capped(result, self._element_query_max_bytes)
         size = _write_jsonl(target, result.elements)
         return result.model_copy(
             update={
