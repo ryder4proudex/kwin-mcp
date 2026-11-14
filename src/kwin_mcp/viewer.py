@@ -273,7 +273,13 @@ class Handoff:
             raise
 
     def give_back(self) -> None:
-        """Return control at once (idempotent), after input already in flight."""
+        """Return control at once (idempotent), after input already in flight.
+
+        Without control there is nothing to wait for: return before the input lock, so a
+        give-back after ``abandon`` never waits behind a slow call still in flight.
+        """
+        if self._current() is None:
+            return
         with self._io:
             if self._current() is None:
                 return
@@ -551,9 +557,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run(worker, handoff, ns.interval)
     finally:
+        # The viewer is exiting: hand control back without waiting for input in flight
+        # (closing the window has usually done so already).
         if handoff is not None:
             with contextlib.suppress(ViewerError):
-                handoff.give_back()
+                handoff.abandon()
         worker.close()
 
 

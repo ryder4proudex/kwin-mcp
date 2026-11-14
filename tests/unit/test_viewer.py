@@ -6,12 +6,15 @@ import contextlib
 import json
 import os
 import socket
+import sys
 import threading
 import time
+import types
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
+from kwin_mcp import viewer
 from kwin_mcp.models import ImageMapping, Point
 from kwin_mcp.viewer import (
     ControlClient,
@@ -380,6 +383,53 @@ def test_abandon_does_not_wait_for_input_in_flight() -> None:
     assert client.gate is not None
     client.gate.set()
     sender.join(5)
+
+
+def test_give_back_after_abandon_does_not_wait_for_input_in_flight() -> None:
+    client = GatedClient()
+    handoff = Handoff(cast("ControlClient", client), "human:test")
+    handoff.take()
+    sender = _input_in_flight(client, handoff)
+    handoff.abandon()
+    closing = threading.Thread(target=handoff.give_back)
+    closing.start()
+    closing.join(2)
+    assert not closing.is_alive()
+    assert [op for op, _ in client.requests] == ["takeover", "human_input", "release"]
+    assert client.gate is not None
+    client.gate.set()
+    sender.join(5)
+
+
+def test_viewer_exit_does_not_wait_for_input_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The whole exit path: the window closes while an input call is still in flight."""
+    client = GatedClient()
+    senders: list[threading.Thread] = []
+
+    class Worker:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def run(_worker: object, handoff: Handoff, _interval: float) -> int:
+        handoff.take()
+        senders.append(_input_in_flight(client, handoff))
+        return 0
+
+    monkeypatch.setattr(viewer, "ControlClient", lambda _path: client)
+    monkeypatch.setattr(viewer, "ObserverWorker", Worker)
+    monkeypatch.setitem(sys.modules, "kwin_mcp.viewer_gtk", types.SimpleNamespace(run=run))
+    argv = ["--dbus-address", "unix:path=/bus", "--wayland-display", "wayland-x"]
+    exiting = threading.Thread(target=viewer.main, args=([*argv, "--control-socket", "/c"],))
+    exiting.start()
+    exiting.join(2)
+    assert not exiting.is_alive()
+    assert [op for op, _ in client.requests] == ["takeover", "human_input", "release"]
+    assert client.gate is not None
+    client.gate.set()
+    senders[0].join(5)
 
 
 def _closing_owner(path: str) -> socket.socket:
