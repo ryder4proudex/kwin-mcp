@@ -14,6 +14,11 @@ import subprocess
 import sys
 import textwrap
 import time
+import types
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pytest
 
 # A GLib timeout stands in for bus traffic: it fires only if the worker
 # dispatches the default main context while it idles between requests.
@@ -80,3 +85,41 @@ def test_worker_reports_a_malformed_request_and_keeps_serving() -> None:
     first, second = (json.loads(line) for line in stdout.splitlines())
     assert first["worker_error"].startswith("JSONDecodeError")
     assert second == {"ok": False, "error": "Unknown operation: x"}
+
+
+def test_worker_start_prints_no_glib_deprecation_warning() -> None:
+    """The stdin watch uses GLibUnix where it exists, not the deprecated GLib name.
+
+    The real worker runs as ``__main__``, where Python shows deprecation warnings
+    by default; ``-W default`` shows them for this ``-c`` stand-in as well.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-W", "default", "-c", _WORKER],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _, stderr = proc.communicate(b'{"op": "x"}\n', timeout=10)
+    assert proc.returncode == 0
+    assert b"unix_fd_add_full" not in stderr, stderr.decode()
+
+
+def test_stdin_watch_falls_back_to_glib_without_glibunix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GLib before 2.80 has no GLibUnix typelib: the old GLib name is used there."""
+    from kwin_mcp import accessibility
+
+    def no_glibunix(namespace: str, version: str) -> None:
+        msg = f"Namespace {namespace} not available"
+        raise ValueError(msg)
+
+    calls: list[tuple[object, ...]] = []
+    fake_glib = types.SimpleNamespace(
+        PRIORITY_DEFAULT=accessibility.GLib.PRIORITY_DEFAULT,
+        unix_fd_add_full=lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr(accessibility.gi, "require_version", no_glibunix)
+    monkeypatch.setattr(accessibility, "GLib", fake_glib)
+    callback = lambda _fd, _condition: True  # noqa: E731
+    condition = object()  # passed through unchanged
+    accessibility._unix_fd_add(0, condition, callback)
+    assert calls == [(fake_glib.PRIORITY_DEFAULT, 0, condition, callback)]

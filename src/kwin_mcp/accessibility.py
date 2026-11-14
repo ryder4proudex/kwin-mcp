@@ -1600,13 +1600,26 @@ def _serve(generation: int) -> None:
             answer(line)
         return True
 
-    GLib.unix_fd_add_full(
-        GLib.PRIORITY_DEFAULT,
-        fd,
-        GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR,
-        on_stdin,
-    )
+    _unix_fd_add(fd, GLib.IOCondition.IN | GLib.IOCondition.HUP | GLib.IOCondition.ERR, on_stdin)
     loop.run()
+
+
+def _unix_fd_add(
+    fd: int, condition: GLib.IOCondition, callback: Callable[[int, GLib.IOCondition], bool]
+) -> None:
+    """Watch ``fd`` in the default main context.
+
+    GLib 2.80 moved the Unix fd watch to GLibUnix and PyGObject warns on the old
+    ``GLib.unix_fd_add_full`` name; the warning reached the server's stderr (and
+    the CLI's output) on every worker start. Older GLib has only the old name.
+    """
+    try:
+        gi.require_version("GLibUnix", "2.0")
+        from gi.repository import GLibUnix
+    except (ValueError, ImportError):
+        GLib.unix_fd_add_full(GLib.PRIORITY_DEFAULT, fd, condition, callback)
+        return
+    GLibUnix.fd_add_full(GLib.PRIORITY_DEFAULT, fd, condition, callback)
 
 
 def _main(argv: list[str]) -> None:
