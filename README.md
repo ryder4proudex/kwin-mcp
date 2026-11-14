@@ -475,7 +475,7 @@ Known limits: `SIGKILL` runs no cleanup, so with `retention.artifacts=false` the
 
 `session_connect(observe=true)` attaches a read-only observer to a session that another process owns, for example a virtual session started by an agent. The observer opens no input backend (EIS) and no clipboard, and refuses `app_launch`, `element_act`, the window mutators and `dbus_call` with an `Observer session` error; it can list windows, query elements and capture the screen. `session_stop` on an observer only detaches: the owner's compositor and apps keep running, because an observer never launched anything. `enable_accessibility=true` is refused with `observe=true`, so an observer never changes the session.
 
-Screen capture by an observer needs KWin's ScreenShot2 in the observed session, which `kwin_wayland --virtual` answers from KWin 6.8. On older KWin an observer still lists windows and queries elements, but `screen_capture` fails with an error that names this requirement: only the session's owner can capture there, through its X11 display (`KWIN_MCP_X11_SCREENSHOT=1`).
+Screen capture by an observer needs KWin's ScreenShot2 in the observed session, which `kwin_wayland --virtual` answers from KWin 6.8. On older KWin, whose virtual session serves no ScreenShot2 at all, an observer still lists windows and queries elements, but `screen_capture` fails with an error that names this requirement; other capture failures keep their own error. The session's owner can still capture there through its X11 display (`KWIN_MCP_X11_SCREENSHOT=1`).
 
 A complete example with two `kwin-mcp-cli` processes (two MCP clients work the same way). A owns a virtual session; B observes it, reads, and disconnects:
 

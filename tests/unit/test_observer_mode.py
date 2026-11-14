@@ -15,6 +15,7 @@ import kwin_mcp.core as core_module
 from kwin_mcp import server as server_module
 from kwin_mcp.core import OBSERVER_CAPTURE_TEXT, OBSERVER_TEXT, AutomationEngine
 from kwin_mcp.models import WindowSelector
+from kwin_mcp.screenshot import ScreenShot2AbsentError
 from kwin_mcp.server import build_server
 
 if TYPE_CHECKING:
@@ -145,29 +146,43 @@ def test_server_gates_refuse_observer(observer: AutomationEngine) -> None:
     asyncio.run(server_module.require_session(ctx))
 
 
-def _failing_capture(**_kwargs: object) -> object:
-    msg = "Screenshot capture failed: ScreenShot2 (UnknownObject); Spectacle (exit 1)"
+ABSENT_TEXT = "Screenshot capture failed: ScreenShot2 (UnknownObject); Spectacle (exit 1)"
+
+
+def _absent_capture(**_kwargs: object) -> object:
+    raise ScreenShot2AbsentError(ABSENT_TEXT)
+
+
+def _other_capture_failure(**_kwargs: object) -> object:
+    msg = "Screenshot capture failed: ScreenShot2 (ServiceUnknown); Spectacle (exit 1)"
     raise RuntimeError(msg)
 
 
-def test_failed_observer_capture_names_the_requirement(
+def test_observer_capture_without_screenshot2_names_the_requirement(
     observer: AutomationEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(core_module, "capture_screenshot_to_file", _failing_capture)
+    monkeypatch.setattr(core_module, "capture_screenshot_to_file", _absent_capture)
+    with pytest.raises(ScreenShot2AbsentError) as exc:
+        observer.screen_capture()
+    assert str(exc.value) == f"{ABSENT_TEXT}\n{OBSERVER_CAPTURE_TEXT}"
+    assert "KWin 6.8" in OBSERVER_CAPTURE_TEXT
+
+
+def test_other_observer_capture_failures_are_unchanged(
+    observer: AutomationEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only an absent ScreenShot2 is the KWin version limit; nothing else gets its text."""
+    monkeypatch.setattr(core_module, "capture_screenshot_to_file", _other_capture_failure)
     with pytest.raises(RuntimeError) as exc:
         observer.screen_capture()
-    assert str(exc.value).startswith("Screenshot capture failed: ScreenShot2 (UnknownObject)")
-    assert str(exc.value).endswith(OBSERVER_CAPTURE_TEXT)
-    assert "KWin 6.8 or later" in OBSERVER_CAPTURE_TEXT
+    assert OBSERVER_CAPTURE_TEXT not in str(exc.value)
 
 
-def test_failed_owner_capture_is_unchanged(
+def test_owner_capture_without_screenshot2_is_unchanged(
     fake_engine: FakeEngine, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(core_module, "capture_screenshot_to_file", _failing_capture)
-    with pytest.raises(RuntimeError) as exc:
+    """The owner can opt into X11 capture instead, so the observer text does not apply."""
+    monkeypatch.setattr(core_module, "capture_screenshot_to_file", _absent_capture)
+    with pytest.raises(ScreenShot2AbsentError) as exc:
         fake_engine.engine.screen_capture()
-    assert (
-        str(exc.value)
-        == "Screenshot capture failed: ScreenShot2 (UnknownObject); Spectacle (exit 1)"
-    )
+    assert str(exc.value) == ABSENT_TEXT

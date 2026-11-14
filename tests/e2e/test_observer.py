@@ -26,6 +26,7 @@ from visual_harness import requires_native_capture
 
 from kwin_mcp.core import OBSERVER_CAPTURE_TEXT, OBSERVER_TEXT, AutomationEngine
 from kwin_mcp.models import Locator, Point, RefAddr, Wait, WindowSelector
+from kwin_mcp.screenshot import ScreenShot2AbsentError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -124,13 +125,17 @@ def test_observer_reads_but_cannot_act(probe_owner: AutomationEngine) -> None:
 
 
 def test_observer_captures_the_screen(probe_owner: AutomationEngine) -> None:
-    """KWin 6.8+ must capture; older KWin must refuse with the stated requirement."""
+    """KWin 6.8+ must capture; older KWin must refuse with the stated requirement.
+
+    Only the absent-ScreenShot2 error is the known limit: any other capture failure
+    fails the test on every KWin version.
+    """
     native = requires_native_capture()
     observer = _observe(probe_owner)
     try:
         try:
             frame = observer.screen_capture()
-        except RuntimeError as exc:
+        except ScreenShot2AbsentError as exc:
             if native:
                 raise
             assert str(exc).endswith(OBSERVER_CAPTURE_TEXT), str(exc)

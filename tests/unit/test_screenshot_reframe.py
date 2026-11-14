@@ -14,6 +14,7 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, Any
 
+import dbus
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from PIL import Image, ImageDraw
@@ -689,3 +690,60 @@ def test_region_with_unproven_mapping_is_error(
     ):
         screenshot.capture_frame_burst("", burst_dir, [0], region=(100, 100, 200, 150))
     assert _published(burst_dir) == []
+
+
+def _absent_chain(monkeypatch: pytest.MonkeyPatch, screenshot2_error: Exception) -> None:
+    """ScreenShot2 raises ``screenshot2_error``; Spectacle and scrot fail."""
+
+    def screenshot2(*_args: object, **_kwargs: object) -> Any:
+        raise screenshot2_error
+
+    def fail(*_args: object, **_kwargs: object) -> Any:
+        msg = "failed in this test"
+        raise RuntimeError(msg)
+
+    for name in ("capture_screenshot_dbus", "_capture_frame_burst_dbus"):
+        monkeypatch.setattr(screenshot, name, screenshot2)
+    for name in ("_capture_spectacle_file", "_capture_frame_burst_spectacle", "_capture_via_scrot"):
+        monkeypatch.setattr(screenshot, name, fail)
+    monkeypatch.setattr(screenshot, "_x11_state", lambda *_args: (WORKSPACE_1280, ()))
+
+
+@pytest.mark.parametrize("x11", [False, True])
+@pytest.mark.parametrize(
+    ("screenshot2_error", "absent"),
+    [
+        (dbus.DBusException("no object", name="org.freedesktop.DBus.Error.UnknownObject"), True),
+        (dbus.DBusException("no method", name="org.freedesktop.DBus.Error.UnknownMethod"), True),
+        (dbus.DBusException("no KWin", name="org.freedesktop.DBus.Error.ServiceUnknown"), False),
+        (RuntimeError("coordinate mapping cannot be proven"), False),
+    ],
+)
+def test_failure_names_an_absent_screenshot2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    screenshot2_error: Exception,
+    absent: bool,
+    x11: bool,
+) -> None:
+    """Only a KWin that serves no ScreenShot2 at all yields ScreenShot2AbsentError.
+
+    Other ScreenShot2 failures (KWin missing from the bus, a bad frame) keep the plain
+    RuntimeError, so callers cannot mistake them for the KWin version limit.
+    """
+    if x11:
+        monkeypatch.setenv("KWIN_MCP_X11_SCREENSHOT", "1")
+        monkeypatch.setenv("DISPLAY", ":99")
+    else:
+        monkeypatch.delenv("KWIN_MCP_X11_SCREENSHOT", raising=False)
+    _absent_chain(monkeypatch, screenshot2_error)
+    expected = screenshot.ScreenShot2AbsentError if absent else RuntimeError
+
+    with pytest.raises(RuntimeError) as capture:
+        screenshot.capture_screenshot_to_file(output_dir=tmp_path / "capture")
+    with pytest.raises(RuntimeError) as burst:
+        screenshot.capture_frame_burst("", tmp_path / "burst", [0])
+
+    for exc_info in (capture, burst):
+        assert type(exc_info.value) is expected
+        assert str(screenshot2_error) in str(exc_info.value)

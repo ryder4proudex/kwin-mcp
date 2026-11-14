@@ -1100,6 +1100,25 @@ def _publish(private: Path, directory: Path, stem: str) -> Path:
         return path
 
 
+# D-Bus errors KWin returns when it does not serve ScreenShot2 at all, as
+# `kwin_wayland --virtual` before KWin 6.8 does (UnknownObject there).
+_SCREENSHOT2_ABSENT = frozenset(
+    {
+        "org.freedesktop.DBus.Error.UnknownObject",
+        "org.freedesktop.DBus.Error.UnknownInterface",
+        "org.freedesktop.DBus.Error.UnknownMethod",
+    }
+)
+
+
+class ScreenShot2AbsentError(RuntimeError):
+    """Every capture backend failed, and KWin does not serve ScreenShot2 at all."""
+
+
+def _screenshot2_absent(exc: Exception) -> bool:
+    return isinstance(exc, dbus.DBusException) and exc.get_dbus_name() in _SCREENSHOT2_ABSENT
+
+
 def _capture_screenshot_file(
     dbus_address: str,
     wayland_socket: str,
@@ -1134,13 +1153,14 @@ def _capture_screenshot_file(
                 include_cursor=include_cursor,
             )
         except RuntimeError as spectacle_exc:
+            error = ScreenShot2AbsentError if _screenshot2_absent(dbus_exc) else RuntimeError
             if not x11_enabled:
                 msg = (
                     "Screenshot capture failed: "
                     f"ScreenShot2 ({dbus_exc}); "
                     f"Spectacle ({spectacle_exc})"
                 )
-                raise RuntimeError(msg) from spectacle_exc
+                raise error(msg) from spectacle_exc
 
             if x11_error is None:
                 try:
@@ -1156,7 +1176,7 @@ def _capture_screenshot_file(
                 f"ScreenShot2 ({dbus_exc}); "
                 f"Spectacle ({spectacle_exc})"
             )
-            raise RuntimeError(msg) from x11_error
+            raise error(msg) from x11_error
 
 
 def _capture_spectacle_file(
@@ -1532,13 +1552,14 @@ def _capture_burst_frames(
                 on_frame=on_frame,
             )
         except RuntimeError as spectacle_exc:
+            error = ScreenShot2AbsentError if _screenshot2_absent(dbus_exc) else RuntimeError
             if not x11_enabled:
                 msg = (
                     "Frame burst capture failed: "
                     f"ScreenShot2 ({dbus_exc}); "
                     f"Spectacle ({spectacle_exc})"
                 )
-                raise RuntimeError(msg) from spectacle_exc
+                raise error(msg) from spectacle_exc
 
             if x11_error is None:
                 try:
@@ -1558,7 +1579,7 @@ def _capture_burst_frames(
                 f"ScreenShot2 ({dbus_exc}); "
                 f"Spectacle ({spectacle_exc})"
             )
-            raise RuntimeError(msg) from x11_error
+            raise error(msg) from x11_error
 
 
 def to_frame(path: Path, mapping: FrameMapping, *, delay_ms: int | None) -> Frame:

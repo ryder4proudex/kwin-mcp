@@ -106,6 +106,7 @@ from kwin_mcp.models import (
     text_echo,
 )
 from kwin_mcp.screenshot import (
+    ScreenShot2AbsentError,
     capture_frame_burst,
     capture_screenshot_to_file,
     reframe_screenshot,
@@ -134,13 +135,13 @@ OBSERVER_TEXT = (
     "Observer session: read-only (no input, clipboard, app launch, window or D-Bus actions).\n"
     "Ask the session owner for control, or connect without observe=true."
 )
-# Appended to a failed observer capture. Without an X11 display of its own (only
-# the session's owner has one), an observer can capture through KWin's ScreenShot2
-# alone, which `kwin_wayland --virtual` answers only from KWin 6.8.
+# Appended to an observer's failed capture when the observed KWin serves no
+# ScreenShot2 at all (ScreenShot2AbsentError): Spectacle needs it too, and an
+# observer of a virtual session has no X11 display of its own.
 OBSERVER_CAPTURE_TEXT = (
-    "Observer screen capture needs KWin's ScreenShot2 in the observed session: "
-    "KWin 6.8 or later for a virtual (--virtual) session. Window lists and element "
-    "queries still work; on older KWin only the session's owner can capture the screen."
+    "Observer screen capture needs KWin's ScreenShot2, which this KWin does not serve; "
+    "a virtual (--virtual) session serves it from KWin 6.8. Window lists and element "
+    "queries do not need it."
 )
 NO_CLIPBOARD_TEXT = (
     "Clipboard not enabled.\n"
@@ -1279,11 +1280,11 @@ class AutomationEngine:
                 include_cursor=include_cursor,
                 output_dir=info.screenshot_dir,
             )
-        except RuntimeError as exc:
+        except ScreenShot2AbsentError as exc:
             if not self._observe:
                 raise
             msg = f"{exc}\n{OBSERVER_CAPTURE_TEXT}"
-            raise RuntimeError(msg) from exc
+            raise ScreenShot2AbsentError(msg) from exc
         try:
             mapping = reframe_screenshot(
                 path, captured, region=_rect_tuple(region), max_edge=max_edge
