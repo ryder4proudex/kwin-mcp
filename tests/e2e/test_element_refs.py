@@ -401,7 +401,8 @@ def test_lru_eviction_at_4097(engine: AutomationEngine, zoo: ZooProcess) -> None
         engine.element_act(RefAddr(ref=last.ref), GTK_CLICK)
     assert str(resolved.value) == (
         f'Element {last.ref} [label] "{last.name}" has no AT-SPI action '
-        f"'{GTK_CLICK}'; it exposes: (none).\nUse one of those action names."
+        f"'{GTK_CLICK}'; it exposes: (none).\n"
+        "Use pointer_click(target={ref}) or keyboard input instead."
     )
     oracle = AtspiOracle(_dbus(engine), timeout_s=300.0)
     assert len(oracle.find(app=APP_ID, name=last.name, role="label")) == 1

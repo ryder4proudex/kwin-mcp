@@ -854,10 +854,16 @@ def _action_by_ref(
         if len(requested) == 1
         else f"none of AT-SPI actions {requested!r}"
     )
+    exposed = [n for n in names if n]
+    # Without any action there is no name to pick: point at the input tools instead.
+    remedy = (
+        "Use one of those action names."
+        if exposed
+        else "Use pointer_click(target={ref}) or keyboard input instead."
+    )
     msg = (
         f'Element {ref} [{info.role}] "{info.name}" has {action_desc}; '
-        f"it exposes: {_exposed([n for n in names if n])}.\n"
-        "Use one of those action names."
+        f"it exposes: {_exposed(exposed)}.\n{remedy}"
     )
     raise _ActionRefusedError(msg)
 

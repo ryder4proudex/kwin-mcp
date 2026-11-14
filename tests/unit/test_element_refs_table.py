@@ -292,6 +292,12 @@ def test_ref_and_strict_refusals_list_exposed_actions(atspi: _FakeAtspi) -> None
         "error": f"Element {ref} [push button] \"Seven\" has no AT-SPI action 'Pre'; "
         "it exposes: Press, SetFocus.\nUse one of those action names.",
     }
+    (label,) = [e["ref"] for e in _query(query="Seven", role="label")]
+    assert _request("action", address={"ref": label}, action_name="Press") == {
+        "ok": False,
+        "error": f"Element {label} [label] \"Seven\" has no AT-SPI action 'Press'; "
+        "it exposes: (none).\nUse pointer_click(target={ref}) or keyboard input instead.",
+    }
 
     response = _request(
         "action", address={"strict": {"query": "seven", "app": "kcalc"}}, action_name="Toggle"
