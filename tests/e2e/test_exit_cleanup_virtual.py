@@ -1293,7 +1293,7 @@ import time
 import kwin_mcp.server as server
 
 
-def failing_terminate_all():
+def failing_terminate_all(*, detach=False):
     raise RuntimeError("injected cleanup failure")
 
 
