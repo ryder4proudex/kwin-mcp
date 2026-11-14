@@ -392,11 +392,15 @@ def _walk_fields(walk: object, max_nodes: int) -> dict[str, Any]:
     """ElementList fields from the worker's walk report (absent from older workers)."""
     if not isinstance(walk, dict):
         return {}
-    return {
+    fields: dict[str, Any] = {
         "visited": int(walk.get("visited", 0)),
         "truncated": walk.get("truncated") or None,
         "max_nodes": max_nodes,
     }
+    suggestions = walk.get("role_suggestions")
+    if isinstance(suggestions, list):
+        fields["role_suggestions"] = [str(role) for role in suggestions]
+    return fields
 
 
 def _centre_on_screen(

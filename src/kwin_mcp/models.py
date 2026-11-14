@@ -502,6 +502,19 @@ class ElementList(BaseModel):
     output_bytes: int = 0
     omitted: int = 0
     inline_max_bytes: int = 0
+    # Set when nothing matched and no element in scope has locator.role: the
+    # roles seen that contain it or are spelled like it.
+    role_suggestions: list[str] | None = None
+
+    def _role_line(self) -> str:
+        role = self.locator.role
+        if self.role_suggestions:
+            close = ", ".join(repr(r) for r in self.role_suggestions)
+            return f"No element in scope has role {role!r}; roles seen that are close: {close}."
+        return (
+            f"No element in scope has role {role!r}; list the roles with an element_query "
+            "without role."
+        )
 
     def _capped_line(self) -> str:
         kept = len(self.elements)
@@ -555,6 +568,8 @@ class ElementList(BaseModel):
         satisfied wait reports its elapsed time last.
         """
         parts = [self._listing()]
+        if self.role_suggestions is not None and not self.elements:
+            parts.append(self._role_line())
         if self.omitted:
             parts.append(self._capped_line())
         if self.truncated is not None:

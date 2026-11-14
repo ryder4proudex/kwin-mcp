@@ -328,7 +328,8 @@
     "output_count",
     "output_bytes",
     "omitted",
-    "inline_max_bytes"
+    "inline_max_bytes",
+    "role_suggestions"
    ]
   },
   {

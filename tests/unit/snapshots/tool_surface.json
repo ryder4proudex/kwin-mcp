@@ -1335,6 +1335,20 @@
     "inline_max_bytes": {
      "default": 0,
      "type": "integer"
+    },
+    "role_suggestions": {
+     "anyOf": [
+      {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
     }
    },
    "required": [

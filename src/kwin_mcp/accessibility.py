@@ -22,13 +22,14 @@ names its ``Atspi.Accessible`` in this worker's LRU ref table.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -312,10 +313,13 @@ class _WalkLimits:
     visited: int = 0
     truncated: str = ""
     deadline: float = 0.0
+    # Lowercased roles of the nodes read, for role suggestions.
+    roles: set[str] = field(default_factory=set)
 
     def start(self) -> None:
         """Reset the counters and start the clock for a new walk."""
         self.visited, self.truncated = 0, ""
+        self.roles = set()
         self.deadline = time.monotonic() + self.time_budget_s
 
     def allows_depth(self, depth: int) -> bool:
@@ -334,8 +338,26 @@ class _WalkLimits:
         self.visited += 1
         return True
 
-    def report(self) -> dict[str, Any]:
-        return {"visited": self.visited, "truncated": self.truncated}
+    def report(self, criteria: _Criteria | None = None, found: int = 1) -> dict[str, Any]:
+        """``visited`` and ``truncated``; ``role_suggestions`` when no node had the role.
+
+        A complete walk (every depth, not truncated) that found nothing for a
+        ``role`` no node in scope has gets ``role_suggestions``: the roles seen
+        that contain it or are close to it.
+        """
+        report: dict[str, Any] = {"visited": self.visited, "truncated": self.truncated}
+        role = "" if criteria is None else criteria.role
+        complete = not self.truncated and self.max_depth is None
+        if role and not found and complete and role not in self.roles:
+            report["role_suggestions"] = _close_roles(role, self.roles)
+        return report
+
+
+def _close_roles(role: str, seen: set[str]) -> list[str]:
+    """Up to five roles in ``seen`` that contain ``role`` or are spelled like it."""
+    containing = [r for r in sorted(seen) if role in r or r in role]
+    close = difflib.get_close_matches(role, sorted(seen), n=5, cutoff=0.6)
+    return list(dict.fromkeys(containing + close))[:5]
 
 
 class _ScopeUnavailableError(Exception):
@@ -406,6 +428,7 @@ def _walk(criteria: _Criteria, limits: _WalkLimits) -> list[_Found]:
             ]
             if scoped and not selected:
                 continue
+        limits.roles.add(app_info.role.lower())
         if criteria.matches(app_info):
             entry = _RefEntry(app, app_info.role, app_name, 0, app, None)
             found.append(_Found(app_info, _UNMAPPED, entry))
@@ -469,6 +492,7 @@ def _collect(
             rect = (info.x, info.y, info.width, info.height)
             scale = _device_pixel_scale(rect, parent_rect, scope.scales)
         _to_logical(info, scale)
+        limits.roles.add(info.role.lower())
         if criteria.matches(info):
             entry = _RefEntry(
                 element, info.role, scope.app, depth, scope.application, scope.toplevel, scale
@@ -511,11 +535,13 @@ def query_elements(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Every element matching ``locator`` within ``limits``, in pre-order, with refs.
 
-    Returns the elements and the walk report (``visited``, ``truncated``).
+    Returns the elements and the walk report (``visited``, ``truncated``, and
+    ``role_suggestions`` when no node in scope had the requested role).
     """
     limits = limits or _WalkLimits()
-    elements = [_mint(item) for item in _walk(_Criteria.from_locator(locator), limits)]
-    return elements, limits.report()
+    criteria = _Criteria.from_locator(locator)
+    elements = [_mint(item) for item in _walk(criteria, limits)]
+    return elements, limits.report(criteria, len(elements))
 
 
 def wait_elements(
@@ -563,7 +589,7 @@ def wait_elements(
                 "elements": [_mint(item) for item in found],
                 "satisfied": satisfied,
                 "elapsed_ms": round((now - start) * 1000),
-                "walk": limits.report(),
+                "walk": limits.report(criteria, len(found)),
             }
         time.sleep(min(interval, deadline - now))
 
