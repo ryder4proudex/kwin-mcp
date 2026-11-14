@@ -457,6 +457,14 @@ async def test_typed_tools_return_schema_valid_structured_content_matching_text(
                 },
                 "elements": [],
                 "wait": None,
+                # No application matched, so the walk read no node.
+                "visited": 0,
+                "truncated": None,
+                "max_nodes": 20000,
+                "window_ids": None,
+                "output_file": None,
+                "output_count": 0,
+                "output_bytes": 0,
             }, empty
             assert record.calls[-1].text == f"No elements found matching app='{MISSING_NAME}'"
 
