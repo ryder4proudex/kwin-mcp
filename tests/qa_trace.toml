@@ -610,7 +610,7 @@ slow = false
 mutants = []
 
 [items."QA-ELEM-002"]
-title = "max_depth: default 15; <=0 = app nodes only; 1 = top-levels; configurable find depth"
+title = "max_depth: default null = every depth (bounded by nodes and time); <=0 = app nodes only; 1 = top-levels; explicit limit honored"
 priority = "P1"
 auto = "e2e"
 check = "pytest"

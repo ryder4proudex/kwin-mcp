@@ -726,13 +726,23 @@ def test_max_depth_zero_returns_application_nodes_only(
 
         label_14, label_16 = DEEP_LABELS.values()
         assert (depth_of[label_14], depth_of[label_16]) == (14, 16)
-        default = engine.element_query(Locator(app=ZOO_APP, query="Deep Label"))
-        assert [e.name for e in default.elements] == [label_14], default.render()
+        # An explicit max_depth stops between the two labels...
+        capped = engine.element_query(Locator(app=ZOO_APP, query="Deep Label"), max_depth=15)
+        assert [e.name for e in capped.elements] == [label_14], capped.render()
         deeper = engine.element_query(Locator(app=ZOO_APP, query="Deep Label"), max_depth=20)
         assert [e.name for e in deeper.elements] == [label_14, label_16], deeper.render()
-        assert not engine.element_query(Locator(app=ZOO_APP, query=DEEP_BUTTON)).elements
-        deepest = engine.element_query(Locator(app=ZOO_APP, query=DEEP_BUTTON), max_depth=64)
+        assert not engine.element_query(
+            Locator(app=ZOO_APP, query=DEEP_BUTTON), max_depth=39
+        ).elements
+        # ...while the default (null) has no depth limit: the walk is bounded by
+        # max_nodes and time instead, and reaches both labels and the depth-40 button.
+        default = engine.element_query(Locator(app=ZOO_APP, query="Deep Label"))
+        assert [e.name for e in default.elements] == [label_14, label_16], default.render()
+        assert [e.depth for e in default.elements] == [14, 16], default.render()
+        assert default.truncated is None, default.render()
+        deepest = engine.element_query(Locator(app=ZOO_APP, query=DEEP_BUTTON))
         assert [e.depth for e in deepest.elements] == [depth_of[DEEP_BUTTON]] == [40]
+        assert deepest.truncated is None, deepest.render()
 
 
 @pytest.mark.qa("QA-ELEM-003")
