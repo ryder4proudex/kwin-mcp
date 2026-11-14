@@ -45,6 +45,7 @@ from kwin_mcp.models import (
     DEFAULT_MAX_NODES,
     DEFAULT_TEXT_MAX_CHARS,
     NO_RETENTION,
+    SCROLL_INTO_VIEW,
     AccessibilityState,
     AppLaunchResult,
     AppLogResult,
@@ -395,6 +396,17 @@ def _walk_fields(walk: object, max_nodes: int) -> dict[str, Any]:
         "truncated": walk.get("truncated") or None,
         "max_nodes": max_nodes,
     }
+
+
+def _centre_on_screen(
+    element: UIElement, regions: list[tuple[int, int, int, int]] | None
+) -> bool | None:
+    """Whether ``element``'s centre lies on a screen; None without a rect or regions."""
+    rect = element.rect
+    if rect is None or not regions:
+        return None
+    x, y = rect.x + rect.width // 2, rect.y + rect.height // 2
+    return any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in regions)
 
 
 def _capped(result: ElementList, budget: int) -> ElementList:
@@ -863,8 +875,8 @@ class AutomationEngine:
                 msg = (
                     f"Element {element.ref} ({element.role} {element.name!r}) is at {where}, "
                     f"outside every screen ({screens}); input there would be dropped.\n"
-                    "Scroll it into view and re-run element_query, or use "
-                    "element_act(element={ref}, action)."
+                    f'Run element_act(element={{ref}}, action="{SCROLL_INTO_VIEW}") and retry, '
+                    "or invoke its action with element_act."
                 )
                 raise RuntimeError(msg)
             msg = (
@@ -1517,6 +1529,13 @@ class AutomationEngine:
             if name.lower() not in seen:
                 seen.add(name.lower())
                 actions.append(name)
+        scroll = SCROLL_INTO_VIEW in seen
+        if scroll and len(actions) > 1:
+            msg = (
+                f"{SCROLL_INTO_VIEW} cannot be combined with other actions.\n"
+                f'Call element_act with action="{SCROLL_INTO_VIEW}" first, then with the action.'
+            )
+            raise ValueError(msg)
         self._require_control()
         address: dict[str, object]
         if isinstance(element, RefAddr):
@@ -1550,11 +1569,16 @@ class AutomationEngine:
         frames, capture_warnings = self._capture(capture)
         warnings.extend(capture_warnings)
         held = HeldInput()
+        on_screen: bool | None = None
+        element_after = UIElement.from_worker(result["element"])
         if self._input is not None:
             warnings.extend(self._revalidate(self._input))
             held = self._input.held()
+            if scroll:
+                on_screen = _centre_on_screen(element_after, self._input.screen_regions("pointer"))
         return ElementActResult(
-            element=UIElement.from_worker(result["element"]),
+            element=element_after,
+            on_screen=on_screen,
             action=chosen_action,
             dispatch="sent_unconfirmed" if dispatch_error else "confirmed",
             dispatch_error=str(dispatch_error) if dispatch_error else None,

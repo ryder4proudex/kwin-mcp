@@ -350,7 +350,7 @@
     {
      "name": "action",
      "required": true,
-     "description": "AT-SPI action name, case-insensitive, e.g. \"Press\", \"Toggle\", \"Activate\" (or \"|\"-separated fallbacks, e.g. \"Press|click\")."
+     "description": "AT-SPI action name, case-insensitive, e.g. \"Press\", \"Toggle\", \"Activate\" (or \"|\"-separated fallbacks, e.g. \"Press|click\"); \"scroll_into_view\" (alone) scrolls the element into view and reports whether it is on screen."
     },
     {
      "name": "capture",
@@ -368,7 +368,8 @@
     "warnings",
     "action",
     "dispatch",
-    "dispatch_error"
+    "dispatch_error",
+    "on_screen"
    ]
   },
   {

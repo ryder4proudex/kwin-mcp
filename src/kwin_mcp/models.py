@@ -1024,6 +1024,10 @@ class TouchPinchResult(ActionResult):
         )
 
 
+# element_act's reserved action: scroll the element into view (Component.scroll_to).
+SCROLL_INTO_VIEW = "scroll_into_view"
+
+
 class ElementActResult(ActionResult):
     """Result of element_act."""
 
@@ -1031,12 +1035,37 @@ class ElementActResult(ActionResult):
     action: str
     dispatch: Dispatch
     dispatch_error: str | None = None
+    # scroll_into_view only: whether the element's centre is on a screen
+    # afterwards (None when unknown).
+    on_screen: bool | None = None
+
+    def _scroll_summary(self, label: str) -> str:
+        element = self.element
+        rect = None if element is None else element.rect
+        if rect is None:
+            unavailable = "" if element is None else element.unavailable
+            return (
+                f"Scrolled {label}, but it has no screen position now "
+                f"(unavailable: {unavailable}).\nRe-run element_query to check it."
+            )
+        centre = f"({rect.x + rect.width // 2}, {rect.y + rect.height // 2})"
+        if self.on_screen is False:
+            return (
+                f"Scrolled {label}, but its centre {centre} is still outside every screen.\n"
+                "Scroll its container with pointer_scroll or keyboard_press, "
+                "then re-run element_query."
+            )
+        if self.on_screen:
+            return f"Scrolled {label} into view: its centre {centre} is on screen."
+        return f"Scrolled {label} into view: its centre is now at {centre}."
 
     def summary(self) -> str:
         element = self.element
         role = "" if element is None else element.role
         name = "" if element is None else element.name
         app = "" if element is None else element.app
+        if self.action == SCROLL_INTO_VIEW:
+            return self._scroll_summary(f'[{role}] "{name}" in {app}')
         if self.dispatch == "sent_unconfirmed":
             return (
                 f"Sent AT-SPI action {self.action!r} to "

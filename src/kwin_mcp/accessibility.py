@@ -34,7 +34,13 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import gi
 
-from kwin_mcp.models import DEFAULT_MAX_NODES, DEFAULT_TEXT_MAX_CHARS, Locator, MatchMode
+from kwin_mcp.models import (
+    DEFAULT_MAX_NODES,
+    DEFAULT_TEXT_MAX_CHARS,
+    SCROLL_INTO_VIEW,
+    Locator,
+    MatchMode,
+)
 from kwin_mcp.spoken_name import SpokenNameKey, normalize_spoken_name, spoken_name_matches
 
 if TYPE_CHECKING:
@@ -695,9 +701,13 @@ class _Candidate:
 
 
 def _strict_candidates(
-    criteria: _Criteria, wanted: str | Sequence[str]
+    criteria: _Criteria, wanted: str | Sequence[str], *, component: bool = False
 ) -> tuple[list[_Candidate], list[str]]:
-    """One preferred matching action per element, with fail-closed discovery."""
+    """One preferred matching action per element, with fail-closed discovery.
+
+    With ``component`` every matching element that has a Component interface
+    (a position) is a candidate for ``scroll_into_view`` instead.
+    """
     priorities = [wanted.lower()] if isinstance(wanted, str) else [a.lower() for a in wanted]
     candidates: list[_Candidate] = []
     exposed: list[str] = []
@@ -740,7 +750,16 @@ def _strict_candidates(
                 raise _IncompleteDiscoveryError(f"could not read element states: {exc}") from exc
             matched = criteria.matches_states(states)
 
-        if matched:
+        if matched and component:
+            try:
+                has_component = element.get_component_iface() is not None
+            except Exception as exc:
+                msg = f"could not read component interface: {exc}"
+                raise _IncompleteDiscoveryError(msg) from exc
+            if has_component:
+                entry = _RefEntry(element, role, app_name, depth, application, toplevel, scale)
+                candidates.append(_Candidate(entry, name, SCROLL_INTO_VIEW))
+        elif matched:
             # An element without an Action interface is not a candidate;
             # every other failure to enumerate its actions is a read fault.
             try:
@@ -881,13 +900,27 @@ def _action_by_locator(
     locator: Locator, action_name: str | Sequence[str]
 ) -> tuple[_RefEntry, ElementInfo, object, int, str]:
     """The single (element, action) candidate of a strict search; refuse anything else."""
+    ref, action = _strict_ref(locator, action_name)
+    return _action_by_ref(ref, action)
+
+
+def _strict_ref(
+    locator: Locator, action_name: str | Sequence[str], *, component: bool = False
+) -> tuple[str, str]:
+    """The ref and action of the single strict-search candidate; refuse anything else."""
     criteria = _Criteria.from_locator(locator)
     try:
-        candidates, exposed = _strict_candidates(criteria, action_name)
+        candidates, exposed = _strict_candidates(criteria, action_name, component=component)
     except _IncompleteDiscoveryError as exc:
         raise _ActionRefusedError(_incomplete_discovery_message(exc, criteria.app)) from exc
     desc = locator.describe()
     requested = [action_name] if isinstance(action_name, str) else list(action_name)
+    if not candidates and component:
+        msg = (
+            f"No element matching {desc} has a position to scroll into view.\n"
+            "Check the locator with element_query."
+        )
+        raise _ActionRefusedError(msg)
     if not candidates:
         target_desc = (
             f"AT-SPI action {requested[0]!r}"
@@ -913,7 +946,91 @@ def _action_by_locator(
             "Narrow the locator (role, states, app) or act on one ref."
         )
         raise _ActionRefusedError(msg)
-    return _action_by_ref(refs[0], candidates[0].action)
+    return refs[0], candidates[0].action
+
+
+_SCROLL_REMEDY = (
+    "Scroll its container with pointer_scroll or keyboard_press (e.g. Page_Down), "
+    "then re-run element_query."
+)
+# How long scroll_into_view waits for the element's extents to settle (smooth
+# scrolling, asynchronous layout) and how often it reads them meanwhile.
+_SCROLL_SETTLE_S = 1.5
+_SCROLL_POLL_S = 0.05
+# Unchanged extents count as settled only after this long: a toolkit can
+# report the old position for a moment after scroll_to returns.
+_SCROLL_MIN_WAIT_S = 0.3
+
+
+def scroll_into_view(address: dict[str, Any]) -> dict[str, Any]:
+    """Scroll ``{ref}`` or the strict ``{strict: locator}`` match into view.
+
+    Calls ``Component.scroll_to(ANYWHERE)``, then re-reads the element until
+    its extents settle, and returns it with its new position. A missing
+    Component interface or a toolkit that does not scroll is a refusal.
+    """
+    if "ref" in address:
+        ref = str(address["ref"])
+    else:
+        locator = Locator.model_validate(address.get("strict") or {})
+        ref, _action = _strict_ref(locator, SCROLL_INTO_VIEW, component=True)
+    resolved = _resolve_refs([ref])[0]
+    if resolved.entry is None or resolved.info is None:
+        raise _ActionRefusedError(resolved.error)
+    entry, info = resolved.entry, resolved.info
+    label = f'{ref} [{info.role}] "{info.name}"'
+    try:
+        component = entry.accessible.get_component_iface()
+    except Exception as exc:
+        msg = f"Stale ref {ref} (element no longer exists); re-run element_query."
+        raise _ActionRefusedError(msg) from exc
+    if component is None:
+        msg = (
+            f"Element {label} has no AT-SPI Component interface, so it has no "
+            f"position to scroll into view.\n{_SCROLL_REMEDY}"
+        )
+        raise _ActionRefusedError(msg)
+    try:
+        scrolled = bool(Atspi.Component.scroll_to(component, Atspi.ScrollType.ANYWHERE))
+    except Exception as exc:
+        reason = f"Component.scroll_to failed: {exc}"
+    else:
+        reason = "" if scrolled else "Component.scroll_to returned false"
+    if reason:
+        msg = f"{entry.app} could not scroll {label} into view ({reason}).\n{_SCROLL_REMEDY}"
+        raise _ActionRefusedError(msg)
+    settled = _settled(ref, info)
+    return {
+        "matches": 1,
+        "app": entry.app,
+        "role": settled.role,
+        "name": settled.name,
+        "action": SCROLL_INTO_VIEW,
+        "invoked": True,
+        "element": asdict(settled),
+    }
+
+
+def _settled(ref: str, before: ElementInfo) -> ElementInfo:
+    """``ref`` re-read until two reads agree on its rect (after a short minimum wait)."""
+    start = time.monotonic()
+    last = before
+    while True:
+        time.sleep(_SCROLL_POLL_S)
+        resolved = _resolve_refs([ref])[0]
+        if resolved.info is None:
+            return last
+        current = resolved.info
+        elapsed = time.monotonic() - start
+        same = _rect_of(current) == _rect_of(last)
+        moved = _rect_of(current) != _rect_of(before)
+        if (same and (moved or elapsed >= _SCROLL_MIN_WAIT_S)) or elapsed >= _SCROLL_SETTLE_S:
+            return current
+        last = current
+
+
+def _rect_of(info: ElementInfo) -> tuple[object, ...]:
+    return (info.x, info.y, info.width, info.height, info.mapped)
 
 
 def invoke_action(address: dict[str, Any], action_name: str | Sequence[str]) -> dict[str, Any]:
@@ -928,6 +1045,9 @@ def invoke_action(address: dict[str, Any], action_name: str | Sequence[str]) -> 
     the exception text in ``error``: the request was sent and the action may
     have run.
     """
+    requested = [action_name] if isinstance(action_name, str) else list(action_name)
+    if [name.lower() for name in requested] == [SCROLL_INTO_VIEW]:
+        return scroll_into_view(address)
     if "ref" in address:
         entry, info, action_iface, index, actual = _action_by_ref(str(address["ref"]), action_name)
     else:

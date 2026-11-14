@@ -100,8 +100,8 @@ def test_element_scrolled_off_screen_is_refused_naming_the_element(engine: FakeE
 
     assert str(excinfo.value) == (
         f"Element {ref} (push button 'Far button') is at (561, 2949), outside every screen "
-        f"({SCREENS}); input there would be dropped.\nScroll it into view and re-run "
-        "element_query, or use element_act(element={ref}, action)."
+        f"({SCREENS}); input there would be dropped.\nRun element_act(element={{ref}}, "
+        'action="scroll_into_view") and retry, or invoke its action with element_act.'
     )
     assert engine.eis.events == []
 

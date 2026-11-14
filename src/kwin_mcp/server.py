@@ -918,7 +918,8 @@ def element_act(
         str,
         Field(
             description='AT-SPI action name, case-insensitive, e.g. "Press", "Toggle", "Activate" '
-            '(or "|"-separated fallbacks, e.g. "Press|click").'
+            '(or "|"-separated fallbacks, e.g. "Press|click"); "scroll_into_view" (alone) '
+            "scrolls the element into view and reports whether it is on screen."
         ),
     ],
     capture: Capture | None = None,

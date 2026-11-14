@@ -43,10 +43,11 @@ class _Extents:
 
 @dataclass
 class _Component:
-    rect: tuple[int, int, int, int]
+    node: Node
 
     def get_extents(self, _coord_type: object) -> _Extents:
-        return _Extents(*self.rect)
+        assert self.node.rect is not None
+        return _Extents(*self.node.rect)
 
 
 class _Actions:
@@ -79,6 +80,10 @@ class Node:
     text: str = ""
     pid: int = 0
     parent: Node | None = None
+    # Component.scroll_to: the rect it moves the node to (None: it returns false),
+    # or the error it raises.
+    scrolled_rect: tuple[int, int, int, int] | None = None
+    scroll_error: str = ""
 
     def __post_init__(self) -> None:
         for child in self.children:
@@ -97,7 +102,7 @@ class Node:
         return _StateSet(self.states)
 
     def get_component_iface(self) -> _Component | None:
-        return None if self.rect is None else _Component(self.rect)
+        return None if self.rect is None else _Component(self)
 
     def get_action_iface(self) -> _Actions | None:
         return _Actions(self.actions) if self.actions else None
@@ -137,12 +142,24 @@ def install(
 ) -> list[Any]:
     """Serve ``apps`` as the AT-SPI desktop and ``windows`` as KWin's list.
 
-    Returns the list that records every ``Atspi.Action.do_action`` call.
+    Returns the list that records every ``Atspi.Action.do_action`` call, and
+    every ``Atspi.Component.scroll_to`` call as ``("scroll_to", name)``.
     """
     invoked: list[Any] = []
 
     def do_action(iface: _Actions, index: int) -> bool:
         invoked.append((iface.names[index], index))
+        return True
+
+    def scroll_to(component: _Component, scroll_type: object) -> bool:
+        node = component.node
+        invoked.append(("scroll_to", node.name))
+        assert scroll_type == "anywhere"
+        if node.scroll_error:
+            raise RuntimeError(node.scroll_error)
+        if node.scrolled_rect is None:
+            return False
+        node.rect = node.scrolled_rect
         return True
 
     monkeypatch.setattr(
@@ -153,6 +170,8 @@ def install(
             CoordType=types.SimpleNamespace(WINDOW=1),
             Text=types.SimpleNamespace(get_character_count=_text_count, get_text=_text_slice),
             Action=types.SimpleNamespace(do_action=do_action),
+            Component=types.SimpleNamespace(scroll_to=scroll_to),
+            ScrollType=types.SimpleNamespace(ANYWHERE="anywhere"),
         ),
     )
     monkeypatch.setattr(accessibility, "_kwin_windows", lambda: (list(windows), ""))

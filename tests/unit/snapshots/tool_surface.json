@@ -1418,7 +1418,7 @@
      "description": "{ref} from element_query, or {strict: Locator}."
     },
     "action": {
-     "description": "AT-SPI action name, case-insensitive, e.g. \"Press\", \"Toggle\", \"Activate\" (or \"|\"-separated fallbacks, e.g. \"Press|click\").",
+     "description": "AT-SPI action name, case-insensitive, e.g. \"Press\", \"Toggle\", \"Activate\" (or \"|\"-separated fallbacks, e.g. \"Press|click\"); \"scroll_into_view\" (alone) scrolls the element into view and reports whether it is on screen.",
      "type": "string"
     },
     "capture": {
@@ -1755,6 +1755,17 @@
      "anyOf": [
       {
        "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null
+    },
+    "on_screen": {
+     "anyOf": [
+      {
+       "type": "boolean"
       },
       {
        "type": "null"
