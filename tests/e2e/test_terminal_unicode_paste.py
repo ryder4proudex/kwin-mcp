@@ -121,7 +121,11 @@ def test_failed_type_into_stalled_konsole_leaves_next_key_unaltered(
     try:
         with pytest.raises(RuntimeError) as excinfo:
             engine.keyboard_type(TEXT, method="unicode")
-        assert str(excinfo.value) == f"Failed to type unicode: {TEXT!r}"
+        assert str(excinfo.value) == (
+            f"Failed to type unicode text ({len(TEXT)} characters).\n"
+            "Check that the focused app accepts text input; for US-QWERTY text, "
+            'retry with method="keys".'
+        )
     finally:
         os.kill(pid, signal.SIGCONT)
     _type_next_line(engine)

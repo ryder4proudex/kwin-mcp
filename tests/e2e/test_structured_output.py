@@ -465,6 +465,10 @@ async def test_typed_tools_return_schema_valid_structured_content_matching_text(
                 "output_file": None,
                 "output_count": 0,
                 "output_bytes": 0,
+                # Nothing was left out of the inline reply, and no role was asked for.
+                "omitted": 0,
+                "inline_max_bytes": 0,
+                "role_suggestions": None,
             }, empty
             assert record.calls[-1].text == f"No elements found matching app='{MISSING_NAME}'"
 

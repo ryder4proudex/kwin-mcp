@@ -203,13 +203,22 @@ def _assert_owners_released_on_replace(env: dict[str, str], display: str, token:
 @contextlib.contextmanager
 def _typing(engine: AutomationEngine, text: str) -> Generator[Future[KeyboardTypeResult]]:
     with ThreadPoolExecutor(max_workers=1) as pool:
-        yield pool.submit(engine.keyboard_type, text, "unicode")
+        yield pool.submit(engine.keyboard_type, text, "unicode", None, True)
 
 
 def _type_unicode(engine: AutomationEngine, text: str) -> None:
     """Type through the clipboard route and check the reported result."""
     result = engine.keyboard_type(text, method="unicode", echo=True)
     _assert_pasted(result, text)
+
+
+def _failed(text: str) -> str:
+    """The error of a failed unicode typing: it counts the text, never quotes it."""
+    return (
+        f"Failed to type unicode text ({len(text)} characters).\n"
+        "Check that the focused app accepts text input; for US-QWERTY text, "
+        'retry with method="keys".'
+    )
 
 
 def _assert_pasted(result: KeyboardTypeResult, text: str) -> None:
@@ -359,7 +368,7 @@ def test_user_copy_during_transient_ownership_is_never_overwritten(
             _wait_until(lambda: owner not in _spawned(display, token), "observed cancellation")
         with pytest.raises(RuntimeError) as excinfo:
             call.result(timeout=CALL_TIMEOUT_SECONDS)
-        assert str(excinfo.value) == f"Failed to type unicode: {SECRET!r}"
+        assert str(excinfo.value) == _failed(SECRET)
 
     assert not _spawned(display, token)
     assert _wl_paste(env, "--no-newline").stdout == USER_COPY.encode()
@@ -393,7 +402,7 @@ def test_stalled_prior_owner_fails_before_paste_without_leaving_an_owner(
         try:
             with pytest.raises(RuntimeError) as excinfo:
                 engine.keyboard_type(SECRET, method="unicode")
-            assert str(excinfo.value) == f"Failed to type unicode: {SECRET!r}"
+            assert str(excinfo.value) == _failed(SECRET)
             # The compositor announces types without asking the frozen owner.
             assert _offered_types(env) == prior_types
         finally:

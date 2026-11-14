@@ -72,7 +72,7 @@ UNKNOWN_KEY_CASES: list[tuple[str, dict[str, Any], str, str]] = [
         "keyboard_type",
         {"text": "a", "unicode": True},
         "unicode",
-        "Valid arguments: text, method, capture.",
+        "Valid arguments: text, method, capture, echo.",
     ),
     (
         "pointer_click",

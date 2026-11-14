@@ -427,6 +427,8 @@ def test_element_query_tree_without_app_filter_reports_all_launched_apps(
     wait_for_app: Callable[[str], ElementList],
 ) -> None:
     _launch_kwrite(kcalc_session, launch, wait_for_app)
+    # Compares whole listings: lift the inline cap (it has its own tests).
+    kcalc_session._element_query_max_bytes = 0
 
     tree = kcalc_session.element_query()
     app_names = {e.name.lower() for e in tree.elements if e.depth == 0}
@@ -749,6 +751,8 @@ def test_max_depth_zero_returns_application_nodes_only(
 def test_app_query_role_case_insensitive_states_exact_case_sensitive(
     kcalc_session: AutomationEngine,
 ) -> None:
+    # Compares whole listings: lift the inline cap (it has its own tests).
+    kcalc_session._element_query_max_bytes = 0
     upper = kcalc_session.element_query(Locator(app="KCAL"))
     lower = kcalc_session.element_query(Locator(app="kcalc"))
     nodes = _atspi(kcalc_session).walk("kcal", 15)
@@ -781,6 +785,8 @@ def test_role_exact_not_substring(
 def test_query_substring_name_role_description(
     kcalc_session: AutomationEngine, fixture_script: Path
 ) -> None:
+    # Compares whole listings: lift the inline cap (it has its own tests).
+    kcalc_session._element_query_max_bytes = 0
     atspi = _atspi(kcalc_session)
     with fixture_app(_info(kcalc_session), fixture_script):
         _wait_for(kcalc_session, Locator(app=FIXTURE, query="Described"))
@@ -841,6 +847,8 @@ def test_states_exact_case_sensitive_and_fields_anded(
 def test_global_rects_and_unavailable_reasons(
     kcalc_session: AutomationEngine, fixture_script: Path
 ) -> None:
+    # Compares whole listings: lift the inline cap (it has its own tests).
+    kcalc_session._element_query_max_bytes = 0
     atspi = _atspi(kcalc_session)
     kwin = _kwin(kcalc_session)
     with fixture_app(_info(kcalc_session), fixture_script) as app:

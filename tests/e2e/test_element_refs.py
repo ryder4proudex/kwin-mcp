@@ -377,6 +377,8 @@ def test_ref_after_window_reopen_is_stale(engine: AutomationEngine, zoo: ZooProc
 @pytest.mark.slow
 @pytest.mark.timeout(600)
 def test_lru_eviction_at_4097(engine: AutomationEngine, zoo: ZooProcess) -> None:
+    # 5000 labels exceed the inline cap; this test needs every one of them.
+    engine._element_query_max_bytes = 0
     zoo.command("labels", "window: Zoo Labels")
     # The worker's deadline is the wait's timeout + 30 s: room for a 5000-label walk.
     found = engine.element_query(

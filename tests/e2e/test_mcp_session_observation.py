@@ -145,8 +145,10 @@ async def test_installed_server_observes_virtual_session_and_apps(
             )
             assert equals["wait"] is None, equals
             assert equals["elements"], equals_text[:500]
+            found = len(equals["elements"])
+            noun = "element" if found == 1 else "elements"
             assert equals_text.startswith(
-                f"Found {len(equals['elements'])} elements matching query='Equals', app='kcalc':"
+                f"Found {found} {noun} matching query='Equals', app='kcalc':"
             ), equals_text[:500]
             assert any(
                 re.match(r'^\s*- \[[^]]+] "Equals"(?: |$)', line)
