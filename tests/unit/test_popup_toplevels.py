@@ -156,3 +156,30 @@ def test_listed_popup_is_not_added_twice(
     accessibility._on_showing(_showing(popup))
 
     assert len(_menu_items()) == 1
+
+
+# PyGObject's GLib.idle_add override imports its asyncio glue, which warns on 3.14.
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+def test_popup_opened_during_a_wait_is_found(
+    monkeypatch: pytest.MonkeyPatch, tracker: accessibility._PopupTracker
+) -> None:
+    # The showing event arrives on the main context while the worker is busy
+    # answering the wait request; the wait must dispatch it between polls.
+    del tracker
+    app, popup = _desktop()
+    install(monkeypatch, [app], WINDOWS)
+    accessibility.GLib.idle_add(lambda: accessibility._on_showing(_showing(popup)) and False)
+
+    response = accessibility._handle_request(
+        {
+            "op": "wait",
+            "locator": {"role": "menu item", "query": "Properties"},
+            "until": "present",
+            "timeout_ms": 2000,
+            "poll_interval_ms": 10,
+        }
+    )
+
+    assert response["ok"] is True
+    assert response["result"]["satisfied"] is True, response
+    assert response["result"]["elapsed_ms"] < 1000

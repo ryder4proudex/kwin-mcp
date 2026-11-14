@@ -118,6 +118,9 @@ _UNMAPPED = _WindowMapping(None, "not-a-window")
 _ACTION_SEARCH_MAX_DEPTH = 64
 # An alias link is looked for among this many children of a parent; past it the child is kept.
 _ALIAS_MAX_SIBLINGS = 512
+# Longest sleep between checks for bus events while a request waits.
+_IDLE_SLICE_S = 0.02
+_IDLE_MIN_EVENTS = 64
 
 # How long a wait for present elements re-polls matches whose window mapping
 # failed because KWin's window list changed during the walk.
@@ -584,7 +587,7 @@ def wait_elements(
                 if settle_deadline is None:
                     settle_deadline = min(deadline, now + _WINDOWS_CHANGED_SETTLE_S)
                 if now < settle_deadline:
-                    time.sleep(min(interval, settle_deadline - now))
+                    _idle(min(interval, settle_deadline - now))
                     continue
         if satisfied or now >= deadline:
             return {
@@ -593,7 +596,29 @@ def wait_elements(
                 "elapsed_ms": round((now - start) * 1000),
                 "walk": limits.report(criteria, len(found)),
             }
-        time.sleep(min(interval, deadline - now))
+        _idle(min(interval, deadline - now))
+
+
+def _idle(seconds: float) -> None:
+    """Wait ``seconds`` while dispatching the bus events queued on the main context.
+
+    A request is answered inside the main loop's stdin callback, so events
+    that arrive meanwhile (a popup announcing itself while a wait polls for
+    its items) would otherwise wait for the reply. GLib does not re-enter the
+    stdin watch that is being dispatched, so no second request starts here.
+    """
+    end = time.monotonic() + max(seconds, 0.0)
+    context = GLib.MainContext.default()
+    # Even a zero wait dispatches a few queued events, so polling never starves them.
+    budget = _IDLE_MIN_EVENTS
+    while True:
+        while context.pending() and (budget > 0 or time.monotonic() < end):
+            context.iteration(False)
+            budget -= 1
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        time.sleep(min(left, _IDLE_SLICE_S))
 
 
 # ── resolve: live data for minted refs ───────────────────────────────────
@@ -1044,7 +1069,7 @@ def _settled(ref: str, before: ElementInfo) -> ElementInfo:
     start = time.monotonic()
     last = before
     while True:
-        time.sleep(_SCROLL_POLL_S)
+        _idle(_SCROLL_POLL_S)
         resolved = _resolve_refs([ref])[0]
         if resolved.info is None:
             return last
