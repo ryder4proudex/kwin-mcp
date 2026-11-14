@@ -41,6 +41,11 @@ KNOWN_LIMIT_PREFIXES: Final[tuple[str, ...]] = (
     # test_observer.py: kwin-mcp-viewer is a GTK 4 app; images without GTK 4 typelibs
     # skip only the viewer test (KWIN_MCP_E2E_REQUIRE=gtk4 makes it fail instead).
     "GTK 4 unavailable: kwin-mcp-viewer needs the Gtk 4.0 typelib",
+    # test_observer.py: before KWin 6.8, a --virtual session answers no ScreenShot2
+    # capture and an observer has no X11 display; only the screenshot test skips,
+    # after checking the error names the requirement (KWIN_MCP_E2E_REQUIRE=observer-capture
+    # makes it fail instead).
+    "KWin limit: observer screen capture needs KWin 6.8 or later",
     # QA-INP-047: KWin 6.7.5 (Fedora 44, Tumbleweed, Arch) crashes (SIGSEGV) when an
     # EIS client holding a button and a key is SIGKILLed; KWin 6.3.6 (Debian) survives.
     "KWin limit: KWin crashes when a killed EIS client held input",

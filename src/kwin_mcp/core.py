@@ -134,6 +134,14 @@ OBSERVER_TEXT = (
     "Observer session: read-only (no input, clipboard, app launch, window or D-Bus actions).\n"
     "Ask the session owner for control, or connect without observe=true."
 )
+# Appended to a failed observer capture. Without an X11 display of its own (only
+# the session's owner has one), an observer can capture through KWin's ScreenShot2
+# alone, which `kwin_wayland --virtual` answers only from KWin 6.8.
+OBSERVER_CAPTURE_TEXT = (
+    "Observer screen capture needs KWin's ScreenShot2 in the observed session: "
+    "KWin 6.8 or later for a virtual (--virtual) session. Window lists and element "
+    "queries still work; on older KWin only the session's owner can capture the screen."
+)
 NO_CLIPBOARD_TEXT = (
     "Clipboard not enabled.\n"
     "Pass enable_clipboard=true to session_start, or use session_connect "
@@ -1264,12 +1272,18 @@ class AutomationEngine:
             raise ValueError(msg)
         info = self._require_info()
 
-        path, captured = capture_screenshot_to_file(
-            dbus_address=info.dbus_address,
-            wayland_socket=info.wayland_socket,
-            include_cursor=include_cursor,
-            output_dir=info.screenshot_dir,
-        )
+        try:
+            path, captured = capture_screenshot_to_file(
+                dbus_address=info.dbus_address,
+                wayland_socket=info.wayland_socket,
+                include_cursor=include_cursor,
+                output_dir=info.screenshot_dir,
+            )
+        except RuntimeError as exc:
+            if not self._observe:
+                raise
+            msg = f"{exc}\n{OBSERVER_CAPTURE_TEXT}"
+            raise RuntimeError(msg) from exc
         try:
             mapping = reframe_screenshot(
                 path, captured, region=_rect_tuple(region), max_edge=max_edge

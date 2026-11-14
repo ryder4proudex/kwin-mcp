@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from _suite_policy import require_or_skip
+from visual_harness import requires_native_capture
 
-from kwin_mcp.core import OBSERVER_TEXT, AutomationEngine
+from kwin_mcp.core import OBSERVER_CAPTURE_TEXT, OBSERVER_TEXT, AutomationEngine
 from kwin_mcp.models import Locator, Point, RefAddr, Wait, WindowSelector
 
 if TYPE_CHECKING:
@@ -34,6 +35,7 @@ GUI_PROBE = E2E_DIR / "gui_probe.py"
 WIDTH, HEIGHT = 1280, 800
 TIMEOUT_MS = 20000
 GTK4_LIMIT = "GTK 4 unavailable: kwin-mcp-viewer needs the Gtk 4.0 typelib"
+CAPTURE_LIMIT = "KWin limit: observer screen capture needs KWin 6.8 or later"
 
 
 def _require_gtk4() -> None:
@@ -95,9 +97,6 @@ def test_observer_reads_but_cannot_act(probe_owner: AutomationEngine) -> None:
         assert windows, "the observer sees the owner's windows"
         elements = observer.element_query(locator=Locator(app="gui_probe.py"))
         assert elements.elements
-        frame = observer.screen_capture()
-        assert frame.width > 0
-        assert Path(frame.path).is_file()
         refusals = [
             lambda: observer.pointer_click(Point(x=10, y=10)),
             lambda: observer.keyboard_type("x"),
@@ -122,6 +121,24 @@ def test_observer_reads_but_cannot_act(probe_owner: AutomationEngine) -> None:
     again = probe_owner.element_query(locator=Locator(app="gui_probe.py"))
     assert again.elements
     probe_owner.pointer_move(Point(x=5, y=5))  # the owner keeps its input
+
+
+def test_observer_captures_the_screen(probe_owner: AutomationEngine) -> None:
+    """KWin 6.8+ must capture; older KWin must refuse with the stated requirement."""
+    native = requires_native_capture()
+    observer = _observe(probe_owner)
+    try:
+        try:
+            frame = observer.screen_capture()
+        except RuntimeError as exc:
+            if native:
+                raise
+            assert str(exc).endswith(OBSERVER_CAPTURE_TEXT), str(exc)
+            require_or_skip("observer-capture", CAPTURE_LIMIT, os.environ)
+        assert frame.width > 0
+        assert Path(frame.path).is_file()
+    finally:
+        observer.session_stop()
 
 
 class FakeOwner:
