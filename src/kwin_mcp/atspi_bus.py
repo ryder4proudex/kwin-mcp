@@ -56,7 +56,9 @@ def _probe(env: Mapping[str, str]) -> tuple[str, str]:
             "Remove or correct AT_SPI_BUS_ADDRESS in the caller's environment."
             if explicit
             else "Inspect `journalctl --user -u at-spi-dbus-bus.service` and the socket "
-            "returned by org.a11y.Bus.GetAddress. When safe, the desktop owner can run "
+            "returned by org.a11y.Bus.GetAddress; a refused or missing socket usually means "
+            "another at-spi-bus-launcher sharing this XDG_RUNTIME_DIR and DISPLAY replaced it "
+            "and exited (docs/troubleshooting/live-atspi.md). When safe, the desktop owner can run "
             "`systemctl --user restart at-spi-dbus-bus.service`; applications may need "
             "to reconnect. For an isolated session, recreate only that session."
         )
