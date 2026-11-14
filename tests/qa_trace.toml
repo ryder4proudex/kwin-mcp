@@ -2156,6 +2156,17 @@ extra_tests = ["tests/e2e/test_eis_handshake.py::test_touch_fallback_to_pointer_
 slow = false
 mutants = []
 
+[items."QA-INP-073"]
+title = "Pointer and touch targets outside every screen are refused before any input"
+priority = "P1"
+auto = "unit"
+check = "pytest"
+file = "tests/unit/test_offscreen_targets.py"
+test = "test_pointer_click_outside_every_screen_is_refused_without_input"
+extra_tests = []
+slow = false
+mutants = []
+
 [items."QA-MCP-001"]
 title = "structuredContent validates against outputSchema for every tool and outcome"
 priority = "P0"

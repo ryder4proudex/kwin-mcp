@@ -399,7 +399,7 @@ Each type has one meaning everywhere it is used. Nested objects reject unknown k
 |------|-------|---------|
 | `Point` | `{x, y}` in global logical px | any `target`, `from`, `to`, `center` |
 | `ElementPoint` | `{ref, dx?=0, dy?=0}`: the centre of a ref's live rectangle plus an offset, read at action time; an element without a rectangle is an error naming the reason | any `target`, `from`, `to`, `center` |
-| `Target` | a `Point` or an `ElementPoint` (`{x, y, ref}` matches neither and is rejected) | `pointer_*`, `touch_*` |
+| `Target` | a `Point` or an `ElementPoint` (`{x, y, ref}` matches neither and is rejected). A gesture that would visit a point outside every screen (a target, a drag waypoint, a touch contact) is refused before any input, because libei drops such points silently and the input would land where the pointer already is; an element scrolled out of view is refused with its ref, role and name | `pointer_*`, `touch_*` |
 | `Rect` | `{x, y, width, height}` in global logical px; width and height positive | `screen_capture.region`, `Capture.region` |
 | `PartialRect` | `{x?, y?, width?, height?}`, at least one field; omitted fields keep their value | `window_place.frame` |
 | `Waypoint` | `{x, y, dwell_ms?=0}` | `pointer_drag.waypoints` |

@@ -19,10 +19,10 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from xml.etree import ElementTree
 
 from kwin_mcp import progress
@@ -33,6 +33,7 @@ from kwin_mcp.input import (
     MouseButton,
     check_typeable,
     chord_keycodes,
+    finger_offsets,
     modifier_keycodes,
     text_keycodes,
 )
@@ -797,6 +798,42 @@ class AutomationEngine:
             )
             resolved.append((point, element))
         return resolved
+
+    @staticmethod
+    def _check_on_screen(
+        inp: InputBackend,
+        device: Literal["pointer", "touch"],
+        points: Iterable[tuple[float, float, UIElement | None]],
+    ) -> None:
+        """Refuse a gesture that would visit a point outside every screen.
+
+        libei drops absolute motion and touch points outside the EIS device's
+        regions without an error, so a click there would land wherever the
+        pointer already was. ``points`` are every point the gesture visits, each
+        with the element it aims at (None for a plain point); nothing is checked
+        when the device reports no regions.
+        """
+        regions = inp.screen_regions(device)
+        if not regions:
+            return
+        for x, y, element in points:
+            if any(rx <= x < rx + rw and ry <= y < ry + rh for rx, ry, rw, rh in regions):
+                continue
+            screens = ", ".join(f"{rw}x{rh}+{rx}+{ry}" for rx, ry, rw, rh in regions)
+            where = f"({x:g}, {y:g})"
+            if element is not None:
+                msg = (
+                    f"Element {element.ref} ({element.role} {element.name!r}) is at {where}, "
+                    f"outside every screen ({screens}); input there would be dropped.\n"
+                    "Scroll it into view and re-run element_query, or use "
+                    "element_act(element={ref}, action)."
+                )
+                raise RuntimeError(msg)
+            msg = (
+                f"Point {where} is outside every screen ({screens}); input there would be "
+                "dropped.\nPass a point inside a screen."
+            )
+            raise ValueError(msg)
 
     def _capture(self, capture: Capture | None) -> tuple[list[Frame], list[str]]:
         """Frames ``capture`` asks for, taken after the action committed.
@@ -1874,6 +1911,7 @@ class AutomationEngine:
         btn = MouseButton(button)
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(target)
+        self._check_on_screen(inp, "pointer", [(point.x, point.y, element)])
         inp.check_not_held("pointer_click", buttons=[btn], keycodes=modifier_codes)
         moved = inp.moved_while_held(btn)
         if moved is not None:
@@ -1903,6 +1941,7 @@ class AutomationEngine:
         """Move the pointer onto a target and leave it there (hover, tooltips)."""
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(target)
+        self._check_on_screen(inp, "pointer", [(point.x, point.y, element)])
         inp.check_move_allowed()
         inp.mouse_move(point.x, point.y)
         frames, held = self._input_epilogue(inp, warnings, capture)
@@ -1923,6 +1962,7 @@ class AutomationEngine:
         steps = max(steps, 1)
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(target)
+        self._check_on_screen(inp, "pointer", [(point.x, point.y, element)])
         moved = inp.moved_while_held(None)
         if moved is not None:
             warnings.append(moved)
@@ -1962,7 +2002,16 @@ class AutomationEngine:
         modifier_codes = modifier_keycodes(modifiers)
         btn = MouseButton(button)
         inp, warnings = self._input_prologue()
-        (start, _), (end, element) = self._resolve_targets(from_, to)
+        (start, start_element), (end, element) = self._resolve_targets(from_, to)
+        self._check_on_screen(
+            inp,
+            "pointer",
+            [
+                (start.x, start.y, start_element),
+                *((w.x, w.y, None) for w in waypoints or ()),
+                (end.x, end.y, element),
+            ],
+        )
         inp.check_not_held("pointer_drag", buttons=[btn], keycodes=modifier_codes)
         moved = inp.moved_while_held(btn)
         if moved is not None:
@@ -2002,6 +2051,7 @@ class AutomationEngine:
         btn = MouseButton(button)
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(target)
+        self._check_on_screen(inp, "pointer", [(point.x, point.y, element)])
         if phase == "press":
             changed = inp.mouse_button_down(point.x, point.y, btn)
         elif phase == "move":
@@ -2107,6 +2157,7 @@ class AutomationEngine:
         """Tap a target with one touch contact (does not move the pointer)."""
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(target)
+        self._check_on_screen(inp, "touch", [(point.x, point.y, element)])
         inp.touch_tap(point.x, point.y, hold_ms=hold_ms)
         frames, held = self._input_epilogue(inp, warnings, capture)
         return TouchTapResult(
@@ -2131,7 +2182,16 @@ class AutomationEngine:
             msg = f"touch_swipe fingers must be at least 1, got {fingers}"
             raise ValueError(msg)
         inp, warnings = self._input_prologue()
-        (start, _), (end, element) = self._resolve_targets(from_, to)
+        (start, start_element), (end, element) = self._resolve_targets(from_, to)
+        offsets = finger_offsets(fingers)
+        self._check_on_screen(
+            inp,
+            "touch",
+            [
+                *((start.x, start.y + dy, start_element if not dy else None) for dy in offsets),
+                *((end.x, end.y + dy, element if not dy else None) for dy in offsets),
+            ],
+        )
         if fingers == 1:
             inp.touch_swipe(start.x, start.y, end.x, end.y, duration_ms=duration_ms)
         else:
@@ -2161,6 +2221,18 @@ class AutomationEngine:
         """Move two contacts symmetrically toward or away from a centre."""
         inp, warnings = self._input_prologue()
         ((point, element),) = self._resolve_targets(center)
+        self._check_on_screen(
+            inp,
+            "touch",
+            [
+                (point.x, point.y, element),
+                *(
+                    (point.x + side * distance / 2, point.y, None)
+                    for distance in (start_distance, end_distance)
+                    for side in (-1, 1)
+                ),
+            ],
+        )
         inp.touch_pinch(point.x, point.y, start_distance, end_distance, duration_ms=duration_ms)
         frames, held = self._input_epilogue(inp, warnings, capture)
         return TouchPinchResult(

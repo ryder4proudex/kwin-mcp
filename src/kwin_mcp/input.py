@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import dbus
 import dbus.bus
@@ -492,6 +492,15 @@ def _load_libei() -> ctypes.CDLL:
     lib.ei_device_stop_emulating.restype = None
     lib.ei_device_stop_emulating.argtypes = [ctypes.c_void_p]
 
+    # Regions: the screen rects an absolute device accepts. libei drops absolute
+    # motion and touch points outside every region without telling the caller.
+    lib.ei_device_get_region.restype = ctypes.c_void_p
+    lib.ei_device_get_region.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    for field in ("x", "y", "width", "height"):
+        getter = getattr(lib, f"ei_region_get_{field}")
+        getter.restype = ctypes.c_uint32
+        getter.argtypes = [ctypes.c_void_p]
+
     # Touch functions
     lib.ei_device_touch_new.restype = ctypes.c_void_p
     lib.ei_device_touch_new.argtypes = [ctypes.c_void_p]
@@ -854,6 +863,29 @@ class EISClient:
                 )
                 raise RuntimeError(msg)
             self._drain_events(remaining)
+
+    def device_regions(
+        self, role: Literal["pointer", "touch"]
+    ) -> list[tuple[int, int, int, int]] | None:
+        """The screen rects ``(x, y, width, height)`` the ``role`` device accepts.
+
+        KWin gives its absolute devices one region per output, in the same
+        logical coordinates as absolute motion. Returns None when the device
+        reports no region (physical devices have none), so nothing can be checked.
+        """
+        lib = _get_libei()
+        device = self._live_device(role)
+        regions: list[tuple[int, int, int, int]] = []
+        while region := lib.ei_device_get_region(device, len(regions)):
+            regions.append(
+                (
+                    lib.ei_region_get_x(region),
+                    lib.ei_region_get_y(region),
+                    lib.ei_region_get_width(region),
+                    lib.ei_region_get_height(region),
+                )
+            )
+        return regions or None
 
     def _bind_seat_capabilities(self, event: int) -> None:
         """Bind to all available capabilities on the seat."""
@@ -1230,6 +1262,15 @@ def _lift_after_failure(client: EISClient, touch_ids: Iterable[int]) -> None:
             client.touch_up(touch_id)
 
 
+# Vertical distance between the contacts of a multi-finger swipe (pixels).
+_FINGER_SPACING = 20
+
+
+def finger_offsets(fingers: int) -> list[float]:
+    """Vertical offset of each multi-finger swipe contact from the group centre."""
+    return [(f - (fingers - 1) / 2.0) * _FINGER_SPACING for f in range(fingers)]
+
+
 class InputBackend:
     """High-level input injection for an isolated KWin session.
 
@@ -1253,6 +1294,12 @@ class InputBackend:
         # their release must go through the replacement device (see _release_replaced).
         self._replaced_buttons: set[MouseButton] = set()
         self._replaced_keys: set[int] = set()
+
+    def screen_regions(
+        self, role: Literal["pointer", "touch"]
+    ) -> list[tuple[int, int, int, int]] | None:
+        """The screen rects the ``role`` device accepts, or None when it reports none."""
+        return self._client.device_regions(role)
 
     # -- Held state -------------------------------------------------------
 
@@ -1900,13 +1947,12 @@ class InputBackend:
         dx = to_x - from_x
         dy = to_y - from_y
         step_delay = max(0.001, duration_ms / 1000.0 / steps)
-        finger_spacing = 20  # pixels between fingers
+        offsets = finger_offsets(fingers)
 
         # Start touches spread vertically around center
         tids: list[int] = []
         try:
-            for f in range(fingers):
-                offset = (f - (fingers - 1) / 2.0) * finger_spacing
+            for offset in offsets:
                 tid = self._client.touch_down(float(from_x), float(from_y + offset))
                 tids.append(tid)
 
@@ -1914,8 +1960,7 @@ class InputBackend:
                 frac = i / steps
                 cx = from_x + dx * frac
                 cy = from_y + dy * frac
-                for f, tid in enumerate(tids):
-                    offset = (f - (fingers - 1) / 2.0) * finger_spacing
+                for offset, tid in zip(offsets, tids, strict=True):
                     self._client.touch_move(tid, cx, cy + offset)
                 _wait(step_delay)
                 _report_step(i, steps, f"{fingers}-finger swipe")

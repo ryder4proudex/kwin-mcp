@@ -67,6 +67,8 @@ class FakeEISClient:
     ``disconnected = True`` stages a closed EIS connection and
     ``lose_role(role)`` a device replacement, both as ``InputBackend.revalidate``
     sees them through ``poll()`` (counted in ``polls``; it never blocks).
+    ``regions`` stages the screen rects ``(x, y, width, height)`` the EIS device
+    accepts; ``None`` (the default) is a device that reports none.
     """
 
     def __init__(self) -> None:
@@ -79,6 +81,7 @@ class FakeEISClient:
         self._failures: dict[EisEventKind, Exception] = {}
         self._next_touch = 1
         self._touches: set[int] = set()
+        self.regions: list[tuple[int, int, int, int]] | None = None
 
     def fail_on(self, kind: EisEventKind, exc: Exception) -> None:
         self._failures[kind] = exc
@@ -96,6 +99,12 @@ class FakeEISClient:
     def take_lost_roles(self) -> set[str]:
         lost, self._lost_roles = self._lost_roles, set()
         return lost
+
+    def device_regions(
+        self, role: Literal["pointer", "touch"]
+    ) -> list[tuple[int, int, int, int]] | None:
+        del role
+        return None if self.regions is None else list(self.regions)
 
     def sync(self) -> bool:
         """A ping round trip: counted in ``syncs``; False once disconnected."""
