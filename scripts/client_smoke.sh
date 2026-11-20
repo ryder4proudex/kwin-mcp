@@ -175,6 +175,7 @@ EOF
         fi
         {
             printf 'approval_policy = "never"\n'
+            skillcfg get codex.effort | sed 's/.*/model_reasoning_effort = "&"/'
             printf 'sandbox_mode = "read-only"\n\n'
             printf '[mcp_servers.kwin]\n'
             printf 'command = "python3"\n'
